@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:minHeight="@dimen/vs_72"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingStart="8dp"
+    android:paddingEnd="8dp"
+    android:paddingTop="4dp"
+    android:paddingBottom="4dp"
+    android:background="@drawable/selector_ku9_item"
+    android:focusable="true">
+
+    <TextView
+        android:id="@+id/tvChannelNum"
+        android:layout_width="@dimen/vs_48"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:textColor="#FFFFFFFF"
+        android:textSize="@dimen/ts_18"
+        android:singleLine="true" />
+
+    <ImageView
+        android:id="@+id/ivChannelLogo"
+        android:layout_width="@dimen/vs_38"
+        android:layout_height="@dimen/vs_38"
+        android:layout_marginEnd="9dp"
+        android:scaleType="centerInside" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tvChannelName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:textColor="#FFFFFFFF"
+            android:textSize="@dimen/ts_20" />
+
+        <TextView
+            android:id="@+id/tvCurrentProgram"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:textColor="#B3FFFFFF"
+            android:textSize="@dimen/ts_16" />
+
+        <TextView
+            android:id="@+id/tvCurrentProgramDesc"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:textColor="#80FFFFFF"
+            android:textSize="@dimen/ts_14" />
+    </LinearLayout>
+</LinearLayout>
