@@ -1,0 +1,5 @@
+修改记录:
+1. 保留 EPG 严格链路：原始频道名 -> epg_data.json name -> epgid -> XMLTV display-name -> channel id -> programme。
+2. EPG Manager 已存在全部日期读取接口，保持 getProgramsForChannelOnDate 从完整 programme 快照筛选。
+3. LogoManager 增加透明化处理容差参数，为白底/灰白压缩边缘继续优化准备。
+4. 播放器重连次数改为无限制策略。

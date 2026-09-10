@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/ku9_guide_program_item"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:minHeight="82dp"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="10dp"
+    android:paddingEnd="8dp"
+    android:paddingTop="5dp"
+    android:paddingBottom="5dp"
+    android:background="@drawable/selector_ku9_item"
+    android:focusable="true">
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tv_guide_program_time"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFFFF"
+            android:textSize="@dimen/ts_18" />
+
+        <TextView
+            android:id="@+id/tv_guide_program_name"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:maxLines="3"
+            android:ellipsize="end"
+            android:textColor="#FFFFFFFF"
+            android:textSize="@dimen/ts_18" />
+
+        <TextView
+            android:id="@+id/tv_guide_program_desc"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:maxLines="5"
+            android:textColor="#88FFFFFF"
+            android:textSize="15sp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tv_guide_program_state"
+        android:layout_width="66dp"
+        android:layout_height="28dp"
+        android:gravity="center"
+        android:textColor="#FFFFFFFF"
+        android:textSize="13sp"
+        android:background="@drawable/bg_ku9_item_focus"
+        android:visibility="gone" />
+</LinearLayout>

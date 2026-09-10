@@ -1,0 +1,170 @@
+name: Auto Build TVBoxOS (Standalone)
+
+on:
+  schedule:
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: '强制重新构建'
+        required: false
+        type: boolean
+      donotpublish:
+        description: '构建后不提交发布新版'
+        required: false
+        type: boolean
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (your repo)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate Version Tag
+        id: version
+        run: |
+          tag=$(date +'%Y%m%d-%H%M')
+          echo "tag=$tag" >> $GITHUB_ENV
+          echo "commitS=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Extra Modify
+        working-directory: ${{ github.workspace }}
+        run: |
+          # 修改版本名
+          sed -i "/versionName/s#[0-9a-zA-Z_\.\'\"-]\+\$#\'${{ env.tag }}\'#" app/build.gradle
+          sed -i "/android:text=/s#=\"#=\"${{ env.tag }}\\\\n\\\\n#" app/src/main/res/layout/dialog_about.xml
+
+          # 添加 maven 源
+          if grep -q 'crosswalk' build.gradle; then
+            sed -i "/crosswalk/a\        maven { url 'https://o0halflife0o.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
+          else
+            sed -i "/jitpack.io/a\        maven { url 'https://o0halflife0o.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
+          fi
+
+          # ========== 修复 Python 路径 ==========
+          # pyramid/build.gradle 中的 buildPython 配置
+          sed -i 's#buildPython("D:/Programs/Python/Python38/python.exe")#buildPython("python3")#g' pyramid/build.gradle
+          # 同时也修复 app/build.gradle（以防万一）
+          sed -i '/buildPython/s/["'"'"'].*["'"'"']/"python3"/' app/build.gradle || true
+          # 验证修复是否成功
+          echo "=== pyramid/build.gradle 中的 buildPython ==="
+          grep "buildPython" pyramid/build.gradle
+          echo "=== app/build.gradle 中的 buildPython ==="
+          grep "buildPython" app/build.gradle || echo "app/build.gradle 中没有 buildPython 配置"
+
+      - name: Compress Source Code
+        run: |
+          tar -cJf sourceCode-${{ env.commitS }}.tar.xz --exclude=.git --exclude=.github *
+
+      - name: Release Apk Sign (Insert signing config)
+        working-directory: ${{ github.workspace }}
+        run: |
+          cat << 'EOF' > signing_configs.gradle
+          signingConfigs {
+              if (project.hasProperty("RELEASE_STORE_FILE")) {
+                  myConfig {
+                      storeFile file(RELEASE_STORE_FILE)
+                      storePassword RELEASE_STORE_PASSWORD
+                      keyAlias RELEASE_KEY_ALIAS
+                      keyPassword RELEASE_KEY_PASSWORD
+                      v1SigningEnabled true
+                      v2SigningEnabled true
+                      enableV3Signing = true
+                      enableV4Signing = true
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > signing_config.gradle
+                      if (project.hasProperty("RELEASE_STORE_FILE")) {
+                          signingConfig signingConfigs.myConfig
+                      }
+          EOF
+
+          cp app/build.gradle app/build.gradle.bak
+          awk '/defaultConfig {/ { while ((getline line < "signing_configs.gradle") > 0) print line } {print}' app/build.gradle.bak > app/build.gradle
+          rm app/build.gradle.bak
+          sed -i "/debug {/r signing_config.gradle" app/build.gradle
+          sed -i "/release {/r signing_config.gradle" app/build.gradle
+
+          cp -f ${{ github.workspace }}/.github/workflows/TVBoxOSC.jks app/TVBoxOSC.jks
+          sed -i '$a\RELEASE_STORE_FILE=./TVBoxOSC.jks'     ./gradle.properties
+          sed -i '$a\RELEASE_KEY_ALIAS=TVBoxOSC'            ./gradle.properties
+          sed -i '$a\RELEASE_STORE_PASSWORD=TVBoxOSC'       ./gradle.properties
+          sed -i '$a\RELEASE_KEY_PASSWORD=TVBoxOSC'         ./gradle.properties
+          sed -i 's/^#\(org.gradle.jvmargs=.*\)/\1/'        ./gradle.properties
+          rm signing_configs.gradle signing_config.gradle
+
+      - name: Create local.properties
+        working-directory: ${{ github.workspace }}
+        run: echo "sdk.dir=/usr/local/lib/android/sdk" > local.properties
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build With Gradle
+        working-directory: ${{ github.workspace }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assemblerelease --build-cache --parallel --daemon --warning-mode all
+
+      - name: Prepare App
+        working-directory: ${{ github.workspace }}
+        run: |
+          rm -rf apk/
+          mkdir -p apk/
+          for file in `find ~ -name "*release*.apk" -print`; do
+            base=$(basename "$file")
+            if [[ "$base" == TVBox_* ]]; then
+              new_base=$(echo "$base" | sed "s/release/standalone_${{ env.tag }}/")
+            else
+              new_base="TVBox_standalone_${{ env.tag }}.apk"
+            fi
+            mv "$file" "apk/$new_base"
+          done
+          mv sourceCode-${{ env.commitS }}.* apk/
+
+      - name: Release Note
+        working-directory: ${{ github.workspace }}
+        run: |
+          export LESSCHARSET=utf-8
+          echo -e "Commit: ${{ env.commitS }}\nBuild Time: ${{ env.tag }}\nChangelog:\n\`\`\`" > apk/standalone-Release.log
+          git log --pretty=format:%B -1 |sed -e "s# \{2,\}#\n#g" -e "/^Merge \(pull\|branch\|remote\)/d" -e '/^$/d' |cat -n |sort -k2,2 -k1,1n |uniq -f1 |sort -k1,1n |cut -f2- >> apk/standalone-Release.log
+          echo -e '\n```' >> apk/standalone-Release.log
+
+      - name: Upload App To Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVBoxOS-Standalone
+          path: |
+            apk/*
+
+  clean:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Delete older workflow runs and artifacts
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 14
+          keep_minimum_runs: 10

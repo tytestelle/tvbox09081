@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 酷9主色调 -->
+    <color name="ku9_primary">#FF6B6B</color>
+    <color name="ku9_primary_dark">#FF5252</color>
+    <color name="ku9_accent">#4ECDC4</color>
+    <color name="ku9_purple">#A78BFA</color>
+    <color name="ku9_blue">#60A5FA</color>
+    
+    <!-- 文字颜色 -->
+    <color name="ku9_text_primary">#FFFFFF</color>
+    <color name="ku9_text_secondary">#B3FFFFFF</color>
+    <color name="ku9_text_hint">#66FFFFFF</color>
+    
+    <!-- 选中高亮 -->
+    <color name="ku9_focus">#FF6B6B</color>
+    <color name="ku9_focus_bg">#33FF6B6B</color>
+</resources>
