@@ -171,8 +171,6 @@ public class EpgManager {
     /** 原始频道名称只做 epg_data.json name 的精确匹配，不再做模糊/包含匹配。 */
     private String getEpgIdByChannelName(String channelName) {
         if (TextUtils.isEmpty(channelName)) return null;
-        // 唯一允许的第一段映射：原始频道名 -> epg_data.json 的 name。
-        // 严格逐字相等，绝不 trim / contains / 大小写 / 模糊匹配。
         synchronized (nameToEpgId) {
             return nameToEpgId.get(channelName);
         }
@@ -379,6 +377,12 @@ public class EpgManager {
      * 重要：这里仍然需要顺序扫描 XMLTV 文件才能定位 programme，但只把
      * 当前频道组对应的 channel/programme 放入内存；绝不建立“全频道节目单”。
      * 切换分组前会清空上一组缓存，因此内存占用与当前组大小相关。
+     *
+     * 关键修复：XMLTV 中的 <display-name> 可能是 epg_data.json 的 name 变体
+     * （例如 "CCTV-1"、"央视一套"），而 requestedEpgIds 里保存的是 epgid
+     * （例如 "CCTV1"）。因此必须先把 display-name 通过 nameToEpgId 映射成
+     * epgid，再判断该 epgid 是否在 requestedEpgIds 中，否则只能命中与 epgid
+     * 完全同名的那个变体，导致同一个 epgid 下其它变体的多天节目被丢弃。
      */
     private boolean parseXmlForEpgIds(File file, Set<String> requestedEpgIds) {
         if (requestedEpgIds == null || requestedEpgIds.isEmpty()) return true;
@@ -421,7 +425,15 @@ public class EpgManager {
                             if (!TextUtils.isEmpty(channelId)) {
                                 String matchedEpgId = null;
                                 for (String displayName : displayNames) {
-                                    // epgid 与 XMLTV display-name 必须完全相等。
+                                    // 【关键修复】先通过 epg_data.json 的 name 映射把 XMLTV 的
+                                    // display-name 转成 epgid，再判断该 epgid 是否是当前组请求的。
+                                    String mappedEpgId = getEpgIdByChannelName(displayName);
+                                    if (mappedEpgId != null && requestedEpgIds.contains(mappedEpgId)) {
+                                        matchedEpgId = mappedEpgId;
+                                        break;
+                                    }
+                                    // 兜底：某些 XMLTV 直接使用 epgid 作为 display-name，
+                                    // 也要能匹配上（此时 nameToEpgId 可能未收录该 display-name）。
                                     if (requestedEpgIds.contains(displayName)) {
                                         matchedEpgId = displayName;
                                         break;
@@ -444,7 +456,7 @@ public class EpgManager {
                                     }
                                     wantedXmlChannelIds.add(channelId);
                                     FileLogger.write(TAG, "XMLTV 精确命中: epgid=[" + matchedEpgId
-                                            + "] -> channel id=[" + channelId + "] icon=[" + icon + "]");
+                                            + "] displayName=[" + displayNames + "] -> channel id=[" + channelId + "] icon=[" + icon + "]");
                                 }
                             }
                             channelId = null;
@@ -1084,16 +1096,6 @@ public class EpgManager {
      * 参考电脑端脚本：四角 + 四条边采样背景色；但 Android 版进一步采用“边缘连通”
      * 处理。这样既能把白色/灰色/JPG 压缩后的背景全部去掉，又不会把台标内部的白色
      * 文字、白色图案误删。透明化只从图片边缘向内扩散，最终统一保存为 ARGB PNG。
-     */
-    /**
-     * 按电脑端透明化脚本的规则处理台标：
-     * 1. 四角 + 四条边采样；
-     * 2. 取边缘出现次数最多的 RGB 作为背景色；
-     * 3. 对整张图逐像素计算 RGB 欧氏距离；
-     * 4. 距离 <= 30 的像素直接 alpha=0。
-     *
-     * 这里故意不再使用“边缘连通”算法。用户电脑端脚本已经验证这种
-     * 全图算法能够把实际白底完整去掉，因此 Android 必须与它保持一致。
      */
     private String readSmallText(File file) {
         if (file == null || !file.isFile()) return "";
