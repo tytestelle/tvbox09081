@@ -621,31 +621,51 @@ public class LivePlayActivity extends BaseActivity {
                 parent = findViewById(android.R.id.content);
             }
             llBottomInfoBar = new LinearLayout(this);
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    dp(760), FrameLayout.LayoutParams.WRAP_CONTENT);
-            lp.gravity = Gravity.BOTTOM | Gravity.START;
-            lp.leftMargin = dp(40);
-            lp.bottomMargin = dp(30);
-            parent.addView(llBottomInfoBar, lp);
+            parent.addView(llBottomInfoBar);
         } else {
             llBottomInfoBar.removeAllViews();
         }
 
         llBottomInfoBar.setOrientation(LinearLayout.HORIZONTAL);
-        llBottomInfoBar.setBackgroundColor(0xCC000000);
+        // ★ 圆角半透明黑底
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xCC000000);
+        bg.setCornerRadius(dp(14));
+        llBottomInfoBar.setBackground(bg);
         llBottomInfoBar.setPadding(dp(20), dp(20), dp(20), dp(20));
         llBottomInfoBar.setGravity(Gravity.CENTER_VERTICAL);
         llBottomInfoBar.setVisibility(View.GONE);
 
+        // ★ 位置和尺寸：底部左侧，宽度为屏幕 60%，圆角
+        llBottomInfoBar.post(() -> {
+            int screenW = getResources().getDisplayMetrics().widthPixels;
+            int screenH = getResources().getDisplayMetrics().heightPixels;
+            ViewGroup.LayoutParams lp = llBottomInfoBar.getLayoutParams();
+            if (lp instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams flp = (FrameLayout.LayoutParams) lp;
+                flp.width = Math.round(screenW * 0.60f);
+                flp.height = FrameLayout.LayoutParams.WRAP_CONTENT;
+                flp.gravity = Gravity.BOTTOM | Gravity.START;
+                flp.leftMargin = Math.round(screenW * 0.05f);
+                flp.bottomMargin = Math.round(screenH * 0.03f);
+                llBottomInfoBar.setLayoutParams(flp);
+            }
+        });
+
+        // ========== 1. 左侧大台标 ==========
         FrameLayout iconBox = new FrameLayout(this);
-        iconBox.setLayoutParams(new LinearLayout.LayoutParams(dp(120), dp(120)));
-        iconBox.setBackgroundColor(0x22FFFFFF);
+        iconBox.setLayoutParams(new LinearLayout.LayoutParams(dp(96), dp(96)));
+        // 圆角背景
+        android.graphics.drawable.GradientDrawable iconBg = new android.graphics.drawable.GradientDrawable();
+        iconBg.setColor(0x22FFFFFF);
+        iconBg.setCornerRadius(dp(10));
+        iconBox.setBackground(iconBg);
 
         imgLiveIconBottom = new ImageView(this);
         imgLiveIconBottom.setLayoutParams(new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         imgLiveIconBottom.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        imgLiveIconBottom.setPadding(dp(12), dp(12), dp(12), dp(12));
+        imgLiveIconBottom.setPadding(dp(10), dp(10), dp(10), dp(10));
         imgLiveIconBottom.setVisibility(View.INVISIBLE);
         iconBox.addView(imgLiveIconBottom);
 
@@ -657,38 +677,40 @@ public class LivePlayActivity extends BaseActivity {
                 FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
         nullTvLp.gravity = Gravity.CENTER;
         liveIconNullTextBottom.setLayoutParams(nullTvLp);
-        liveIconNullTextBottom.setTextSize(48);
+        liveIconNullTextBottom.setTextSize(36);
         liveIconNullTextBottom.setTextColor(0xFFFFFFFF);
         liveIconNullBgBottom.addView(liveIconNullTextBottom);
         iconBox.addView(liveIconNullBgBottom);
 
         llBottomInfoBar.addView(iconBox);
 
+        // ========== 2. 右侧信息区 ==========
         LinearLayout infoBox = new LinearLayout(this);
         infoBox.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        infoLp.leftMargin = dp(20);
+        infoLp.leftMargin = dp(16);
         infoBox.setLayoutParams(infoLp);
         llBottomInfoBar.addView(infoBox);
 
+        // ---- 行1：频道号 + 频道名 + 标签 ----
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
         row1.setGravity(Gravity.CENTER_VERTICAL);
         infoBox.addView(row1);
 
         tvChannelNumBottom = new TextView(this);
-        tvChannelNumBottom.setTextSize(22);
+        tvChannelNumBottom.setTextSize(18);
         tvChannelNumBottom.setTypeface(null, android.graphics.Typeface.BOLD);
         tvChannelNumBottom.setTextColor(0xFFFFD54F);
         LinearLayout.LayoutParams numLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        numLp.rightMargin = dp(10);
+        numLp.rightMargin = dp(8);
         tvChannelNumBottom.setLayoutParams(numLp);
         row1.addView(tvChannelNumBottom);
 
         tvChannelNameBottom = new TextView(this);
-        tvChannelNameBottom.setTextSize(22);
+        tvChannelNameBottom.setTextSize(18);
         tvChannelNameBottom.setTypeface(null, android.graphics.Typeface.BOLD);
         tvChannelNameBottom.setTextColor(0xFFFFFFFF);
         tvChannelNameBottom.setLayoutParams(new LinearLayout.LayoutParams(
@@ -702,12 +724,13 @@ public class LivePlayActivity extends BaseActivity {
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         row1.addView(llChannelTags);
 
+        // ---- 行2：进度条 + 距结束（进度条撑满）----
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
         row2.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams row2Lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        row2Lp.topMargin = dp(10);
+        row2Lp.topMargin = dp(8);
         row2.setLayoutParams(row2Lp);
         infoBox.addView(row2);
 
@@ -719,71 +742,74 @@ public class LivePlayActivity extends BaseActivity {
         row2.addView(epgProgressBar);
 
         tvEpgRemaining = new TextView(this);
-        tvEpgRemaining.setTextSize(13);
+        tvEpgRemaining.setTextSize(12);
         tvEpgRemaining.setTextColor(0xCCFFFFFF);
         LinearLayout.LayoutParams remainingLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        remainingLp.leftMargin = dp(10);
+        remainingLp.leftMargin = dp(8);
         tvEpgRemaining.setLayoutParams(remainingLp);
         tvEpgRemaining.setSingleLine(true);
         row2.addView(tvEpgRemaining);
 
+        // ---- 行3：正在播放 ----
         LinearLayout row3 = new LinearLayout(this);
         row3.setOrientation(LinearLayout.HORIZONTAL);
         row3.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams row3Lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        row3Lp.topMargin = dp(10);
+        row3Lp.topMargin = dp(8);
         row3.setLayoutParams(row3Lp);
         infoBox.addView(row3);
 
         TextView label3 = new TextView(this);
         label3.setText("正在播放：");
         label3.setTextColor(0xCCFFFFFF);
-        label3.setTextSize(15);
+        label3.setTextSize(13);
         row3.addView(label3);
 
         tvCurrentProgramName = new TextView(this);
         tvCurrentProgramName.setLayoutParams(new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         tvCurrentProgramName.setTextColor(0xFFFFFFFF);
-        tvCurrentProgramName.setTextSize(15);
+        tvCurrentProgramName.setTextSize(13);
         tvCurrentProgramName.setSingleLine(true);
         tvCurrentProgramName.setEllipsize(android.text.TextUtils.TruncateAt.END);
         row3.addView(tvCurrentProgramName);
 
+        // ---- 行4：描述（最多 3 行） ----
         tvDesc = new TextView(this);
         tvDesc.setTextColor(0x99FFFFFF);
-        tvDesc.setTextSize(13);
+        tvDesc.setTextSize(12);
         tvDesc.setMaxLines(3);
         tvDesc.setEllipsize(android.text.TextUtils.TruncateAt.END);
         tvDesc.setLineSpacing(dp(2), 1f);
         LinearLayout.LayoutParams descLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        descLp.topMargin = dp(6);
+        descLp.topMargin = dp(4);
         tvDesc.setLayoutParams(descLp);
         infoBox.addView(tvDesc);
 
+        // ---- 行5：下一节目 ----
         LinearLayout row5 = new LinearLayout(this);
         row5.setOrientation(LinearLayout.HORIZONTAL);
         row5.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams row5Lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        row5Lp.topMargin = dp(6);
+        row5Lp.topMargin = dp(4);
         row5.setLayoutParams(row5Lp);
         infoBox.addView(row5);
 
         TextView label5 = new TextView(this);
         label5.setText("下一节目：");
         label5.setTextColor(0xCCFFFFFF);
-        label5.setTextSize(15);
+        label5.setTextSize(13);
         row5.addView(label5);
 
         tvNextProgramName = new TextView(this);
         tvNextProgramName.setLayoutParams(new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         tvNextProgramName.setTextColor(0xFFFFFFFF);
-        tvNextProgramName.setTextSize(15);
+        tvNextProgramName.setTextSize(13);
         tvNextProgramName.setSingleLine(true);
         tvNextProgramName.setEllipsize(android.text.TextUtils.TruncateAt.END);
         row5.addView(tvNextProgramName);
