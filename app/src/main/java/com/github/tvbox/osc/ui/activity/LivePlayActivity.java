@@ -152,7 +152,7 @@ public class LivePlayActivity extends BaseActivity {
     private TextView tvEpgRemaining;
     private TextView tvCurrentProgramName;
     private TextView tvNextProgramName;
-    private TextView tvDesc; // 新增：用于显示节目描述
+    private TextView tvDesc;
     private boolean isBottomInfoBarShowing = false;
     private static final float GESTURE_EDGE_RATIO = 0.18f;
     private static final long BOTTOM_INFO_SHOW_DURATION = 5000L;
@@ -371,9 +371,6 @@ public class LivePlayActivity extends BaseActivity {
             epgStringAddress = getConfiguredEpgAddress();
             EpgManager epgManager = EpgManager.getInstance(this);
             epgManager.setEpgUrl(epgStringAddress);
-            // 启动后只检查 EPG URL 对应的 .hash：
-            // hash 未变化直接使用本地 epg.xml；变化/本地不存在才下载。
-            // refreshEpg 本身不解析整份 XML，频道组进入后再按需解析。
             if (isXmlEpgAddress(epgStringAddress)) {
                 epgManager.refreshEpg(null);
             }
@@ -824,10 +821,6 @@ public class LivePlayActivity extends BaseActivity {
         return str.substring(0, spaceIndex);
     }
 
-    /**
-     * 获取当前直播源分组的全部频道名称。EPG 按组懒加载：一个分组只解析一次，
-     * 该组内所有频道共用同一批 XMLTV 数据，频道组、节目单和中下方窗口都从这批缓存读取。
-     */
     private ArrayList<String> getCurrentLiveGroupChannelNames() {
         ArrayList<String> names = new ArrayList<>();
         try {
@@ -854,18 +847,12 @@ public class LivePlayActivity extends BaseActivity {
         final String dateStr = timeFormat.format(date);
         String epgTagName = channelNameReal;
 
-        // XMLTV 是唯一数据源：先检查 URL+.hash，hash 变化才下载；所有网络/解析工作均在后台。
-        // 这里绝不走旧的 EpgUtil/LogoManager，避免旧台标或“今天 EPG”覆盖 XMLTV 数据。
         if (isXmlEpgAddress(epgStringAddress)) {
             final EpgManager manager = EpgManager.getInstance(this);
             manager.refreshEpg(new EpgManager.RefreshCallback() {
                 @Override public void onSuccess() {
                     if (channel_Name == null || !channelName.equals(channel_Name.getChannelName())) return;
 
-                    // refreshEpg 只负责 hash/下载，不做全量 XML 解析。
-                    // 关键：XMLTV EPG 按“订阅源分组”懒加载。这里绝不能只加载当前一个频道，
-                    // 否则中下方窗口一刷新就会把刚刚加载好的整组 EPG 缓存替换掉，节目单
-                    // 再切日期/频道时就会出现“今天有、其它日期没有”的现象。
                     final ArrayList<String> currentGroupNames = getCurrentLiveGroupChannelNames();
                     if (currentGroupNames.isEmpty()) currentGroupNames.add(channelName);
                     manager.loadChannelGroup(currentGroupNames, () -> {
@@ -877,8 +864,7 @@ public class LivePlayActivity extends BaseActivity {
                             for (EpgManager.EpgProgram p : ps) {
                                 if (p == null || p.start == null || p.stop == null || !p.stop.after(p.start)) continue;
                                 Epginfo info = createXmlEpgInfoFromProgram(p, idx++);
-                                // XMLTV <desc> 原文完整保留，只去掉字段首尾无意义空白，不截断内容。
-                    info.desc = p.description == null ? "" : p.description;
+                                info.desc = p.description == null ? "" : p.description;
                                 xmlList.add(info);
                             }
                         } catch (Exception e) {
@@ -893,7 +879,6 @@ public class LivePlayActivity extends BaseActivity {
                 }
                 @Override public void onError(String msg) {
                     FileLogger.write("LivePlay", "XMLTV EPG刷新失败: " + msg);
-                    // 下载失败不清空正在播放状态；已有 epgche/epg.xml 会继续使用。
                 }
             });
             if (epgListAdapter != null && currentLiveChannelItem != null) {
@@ -997,9 +982,6 @@ public class LivePlayActivity extends BaseActivity {
         if (userEpgAddress != null && userEpgAddress.trim().length() >= 5) {
             return userEpgAddress.trim();
         }
-        // 没有用户自定义 EPG 时，优先读取 configuration.json 的 EPG_URLS。
-        // 不能回退到旧的“按频道/按日期 JSON 接口”，否则 EpgManager 永远不会
-        // 进入 XMLTV 下载流程，files/epgche/ 下也就不会生成 epg.xml。
         try (InputStream is = getAssets().open("configuration.json")) {
             JsonObject root = JsonParser.parseReader(new InputStreamReader(is, StandardCharsets.UTF_8)).getAsJsonObject();
             JsonObject configuration = root.getAsJsonObject("Configuration");
@@ -1249,17 +1231,14 @@ public class LivePlayActivity extends BaseActivity {
         return trimName;
     }
 
-    // ===== 显示 EPG 信息（包含描述） =====
     @SuppressLint("SetTextI18n")
     private void showBottomEpg() {
         if (isSHIYI) return;
         if (channel_Name == null || channel_Name.getChannelName() == null) return;
 
-        // 更新频道名称和号码
         tip_chname.setText(channel_Name.getChannelName());
         tv_channelnum.setText("" + channel_Name.getChannelNum());
 
-        // 优先使用当前已解析的 EPG 列表，确保 XMLTV/JSON 的 desc 和完整节目名称不丢失。
         Epginfo currentEpg = null, nextEpg = null;
         if (epgdata != null && !epgdata.isEmpty()) {
             int idx = findCurrentEpgIndex(epgdata);
@@ -1326,7 +1305,6 @@ public class LivePlayActivity extends BaseActivity {
             if (tvNextProgramName != null) tvNextProgramName.setText("暂无节目预告");
         }
 
-        // 更新线路信息
         TextView tvSource = findViewById(R.id.tv_source);
         if (channel_Name == null || channel_Name.getSourceNum() <= 0) {
             if (tvSource != null) tvSource.setText("1/1");
@@ -1334,14 +1312,11 @@ public class LivePlayActivity extends BaseActivity {
             if (tvSource != null) tvSource.setText("线路" + (channel_Name.getSourceIndex() + 1) + "/" + channel_Name.getSourceNum());
         }
 
-        // 更新右侧顶部频道名
         if (tv_right_top_channel_name != null) tv_right_top_channel_name.setText(channel_Name.getChannelName());
         if (tv_right_top_epg_name != null) tv_right_top_epg_name.setText(channel_Name.getChannelName());
 
-        // 更新底部信息栏
         updateBottomInfoBar();
 
-        // 处理加载动画和计时器（保留原有逻辑）
         if (countDownTimer != null) countDownTimer.cancel();
         if (!"暂无当前节目".equals(tip_epg1.getText().toString())) {
             if (ll_right_top_loading != null) ll_right_top_loading.setVisibility(View.VISIBLE);
@@ -1367,7 +1342,6 @@ public class LivePlayActivity extends BaseActivity {
             if (ll_epg != null) ll_epg.setVisibility(View.GONE);
         }
 
-        // 更新频道图标
         updateCurrentChannelIcon();
     }
 
@@ -1440,7 +1414,7 @@ public class LivePlayActivity extends BaseActivity {
                         com.bumptech.glide.Glide.with(LivePlayActivity.this).load(file).dontAnimate().into(imgLiveIcon);
                     }
                 });
-                return; // XMLTV 台标只能使用处理后的 epgid.png，禁止后续原始图片覆盖。
+                return;
             }
             if (channel_Name.getChannelLogo() != null && !channel_Name.getChannelLogo().isEmpty()) {
                 iconUrl = channel_Name.getChannelLogo();
@@ -1458,7 +1432,6 @@ public class LivePlayActivity extends BaseActivity {
             } else if (!logoUrl.equals("false")) {
                 iconUrl = logoUrl.replace("{name}", epgTagName);
             }
-            // XMLTV 台标统一走异步透明化结果，禁止直接读取旧 PNG。
             updateChannelIcon(channelName, iconUrl);
         });
     }
@@ -1485,7 +1458,6 @@ public class LivePlayActivity extends BaseActivity {
             if (local != null && local.exists()) {
                 com.bumptech.glide.Glide.with(this).load(local).dontAnimate().into(imgLiveIcon);
             } else {
-                // 与频道组保持一致：未完成透明化前不直接显示原始白底远程图片。
                 imgLiveIcon.setImageDrawable(null);
                 lm.downloadLogo(channel_Name.getChannelName(), finalLogoUrl, new com.github.tvbox.osc.util.logo.LogoManager.LogoCallback() {
                     @Override public void onSuccess(File file) {
@@ -1494,7 +1466,6 @@ public class LivePlayActivity extends BaseActivity {
                         }
                     }
                     @Override public void onError(String msg) {
-                        // 保留已经显示的远程/缓存台标，不因下载失败清空。
                     }
                 });
             }
@@ -2284,7 +2255,6 @@ public class LivePlayActivity extends BaseActivity {
         }
     }
 
-    /** 安装一次全局播放器状态监听，用于捕获 IJK/Exo/AndroidMediaPlayer 的错误和异常结束。 */
     private void installLiveReconnectListener() {
         if (liveReconnectListenerInstalled || mVideoView == null) return;
         liveReconnectListenerInstalled = true;
@@ -2318,7 +2288,6 @@ public class LivePlayActivity extends BaseActivity {
             FileLogger.write("LivePlay", "直播断线自动重连: attempt=" + liveReconnectAttempts
                     + "/" + LIVE_RECONNECT_MAX_RETRIES + " channel=[" + channelName + "]");
 
-            // 释放旧播放器实例再重新创建，避免 IJK 在 ERROR 状态下无法再次 prepareAsync。
             try { mVideoView.release(); } catch (Exception ignored) { }
             if (generation != liveReconnectGeneration || isFinishing()) return;
             mVideoView.setUrl(url, liveChannelHeader());
@@ -2328,7 +2297,6 @@ public class LivePlayActivity extends BaseActivity {
 
     private void scheduleLiveReconnect(String reason) {
         if (isFinishing() || currentLiveChannelItem == null || !hasCurrentLiveChannelSource()) return;
-        // 播放器正常切换/正在播放时不进入重连队列。
         if (mVideoView != null && (mVideoView.getCurrentPlayState() == VideoView.STATE_PLAYING
                 || mVideoView.getCurrentPlayState() == VideoView.STATE_BUFFERED)) return;
         if (liveReconnectAttempts >= LIVE_RECONNECT_MAX_RETRIES) return;
@@ -2364,7 +2332,6 @@ public class LivePlayActivity extends BaseActivity {
             livePlayerManager.getLiveChannelPlayer(mVideoView, currentLiveChannelItem.getChannelName());
         }
 
-        // 任何真正的换台都取消旧频道的重连任务，避免旧 URL 在后台重新抢占播放器。
         cancelLiveReconnect();
         channel_Name = currentLiveChannelItem;
         currentLiveLookBackIndex = -1;
@@ -2597,14 +2564,9 @@ public class LivePlayActivity extends BaseActivity {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { ku9GuideDateAdapter.setFocusedIndex(-1); }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 ku9GuideDateAdapter.setFocusedIndex(position);
-                // 焦点移动到哪一天，就立即把“选中日期”同步到哪一天。
-                // 旧代码只更新 focusedIndex，没有更新 selectedIndex，任何异步刷新/台标加载
-                // 都会再次读取 selectedIndex，从而把节目单偷偷跳回“今天”。
                 if (position >= 0 && position < ku9GuideDateAdapter.getItemCount()) {
                     ku9GuideDateAdapter.setSelectedIndex(position);
                 }
-                // 日期栏本身的数据已经来自 XMLTV 全部 programme；焦点移动到哪一天，
-                // 右侧节目列表就从同一份完整快照读取哪一天，绝不回退到“今天”。
                 if (ku9GuideShowing && position >= 0 && position < ku9GuideDateAdapter.getItemCount()) {
                     LiveEpgDate d = ku9GuideDateAdapter.getItem(position);
                     if (d != null) loadKu9GuidePrograms(
@@ -2646,40 +2608,31 @@ public class LivePlayActivity extends BaseActivity {
             ku9GuideChannelList.setSelection(selected);
         }
 
-        int oldDateIndex = ku9GuideDateAdapter.getSelectedIndex();
-        String oldDateKey = null;
-        if (oldDateIndex >= 0 && oldDateIndex < ku9GuideDateAdapter.getItemCount()) {
-            oldDateKey = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(ku9GuideDateAdapter.getItem(oldDateIndex).getDateParamVal());
-        }
-        // XMLTV 文件型 EPG 只认 epgche/epg.xml。打开节目单时先在后台检查 URL.hash，
-        // hash 未变就直接读取本地文件，hash 变了才下载；解析完成后再一次性建立该频道的全部日期。
-        // 不再用“今天”作为最终数据，只在后台加载期间作为临时占位。
+        // 先用当前内存中已有数据尝试同步构建日期栏；若 EPG 尚未解析成功，日期栏可能暂时为空，
+        // 随后由 ensureKu9GuideEpgLoaded 的异步回调重新构建。
         rebuildKu9GuideDatesForChannel(selected);
+
+        // 同步刷新日期栏视图
+        if (ku9GuideDateAdapter != null) {
+            ku9GuideDateAdapter.notifyDataSetChanged();
+        }
+
         ensureKu9GuideEpgLoaded(selected);
-        int guideDateIndex = -1;
-        if (oldDateKey != null) {
-            for (int i = 0; i < ku9GuideDateAdapter.getItemCount(); i++) {
-                if (oldDateKey.equals(new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(ku9GuideDateAdapter.getItem(i).getDateParamVal()))) { guideDateIndex = i; break; }
-            }
-        }
-        if (guideDateIndex < 0) {
-            guideDateIndex = 0;
-            String today = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(new Date());
-            for (int i = 0; i < ku9GuideDateAdapter.getItemCount(); i++) {
-                if (today.equals(new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(ku9GuideDateAdapter.getItem(i).getDateParamVal()))) { guideDateIndex = i; break; }
-            }
-        }
+
+        // 同步 EPG 场景：日期栏已经填充完毕，直接定位今天/保留日期并加载节目。
         if (ku9GuideDateAdapter.getItemCount() > 0) {
-            guideDateIndex = Math.max(0, Math.min(guideDateIndex, ku9GuideDateAdapter.getItemCount() - 1));
-            ku9GuideDateAdapter.setSelectedIndex(guideDateIndex);
-            ku9GuideDateList.setSelection(guideDateIndex);
+            int di = findKu9GuideDateIndex(getSelectedKu9GuideDateKey());
+            if (di < 0) di = findTodayGuideDateIndex();
+            if (di < 0) di = 0;
+            di = Math.max(0, Math.min(di, ku9GuideDateAdapter.getItemCount() - 1));
+            ku9GuideDateAdapter.setSelectedIndex(di);
+            ku9GuideDateList.setSelection(di);
             if (ku9GuideChannelAdapter.getItemCount() > 0) {
-                Date guideDate = ku9GuideDateAdapter.getData().get(guideDateIndex).getDateParamVal();
-                loadKu9GuidePrograms(selected, guideDate);
-                if (ku9GuideProgramAdapter.getItemCount() == 0 && !isXmlEpgAddress(epgStringAddress)) getEpg(guideDate);
+                LiveEpgDate selectedDate = ku9GuideDateAdapter.getItem(di);
+                if (selectedDate != null) loadKu9GuidePrograms(selected, selectedDate.getDateParamVal());
             }
         }
-        // 节目单窗口左侧固定显示“频道组”按钮，用于返回频道组窗口。
+
         if (ku9GuideChannelGroupButton != null) {
             ku9GuideChannelGroupButton.setVisibility(View.VISIBLE);
             ku9GuideChannelGroupButton.bringToFront();
@@ -2693,16 +2646,12 @@ public class LivePlayActivity extends BaseActivity {
         final int requestChannelPosition = channelPosition;
         LiveChannelItem item = ku9GuideChannelAdapter.getItem(requestChannelPosition);
         if (item == null) return;
-        // 每次打开节目单都先做一次轻量 hash 检查。hash 未变化只读取本地 epgche/epg.xml，
-        // hash 变化才重新下载；不能因为内存里已有“今天”的数据就跳过检查，否则运行期间更新的 EPG 永远不会进入节目单。
         if (ku9GuideEpgLoadRequested) return;
         ku9GuideEpgLoadRequested = true;
         EpgManager.getInstance(this).refreshEpg(new EpgManager.RefreshCallback() {
             @Override public void onSuccess() {
                 ku9GuideEpgLoadRequested = false;
                 if (!ku9GuideShowing || ku9GuideChannelAdapter == null || ku9GuideChannelAdapter.getItemCount() == 0) return;
-                // 请求期间用户可能已经换台。先把“当前节目单所属频道组”按需解析，
-                // 而不是解析整份 EPG；节目单里的每个频道都来自当前这一组。
                 ArrayList<String> groupNames = new ArrayList<>();
                 for (int i = 0; i < ku9GuideChannelAdapter.getItemCount(); i++) {
                     LiveChannelItem ci = ku9GuideChannelAdapter.getItem(i);
@@ -2717,19 +2666,18 @@ public class LivePlayActivity extends BaseActivity {
                             ? ku9GuideChannelFocusPosition : Math.max(0, currentLiveChannelIndex);
                     cp = Math.max(0, Math.min(cp, ku9GuideChannelAdapter.getItemCount() - 1));
 
-                    // XMLTV 文件通常包含约 7 天。解析完成后必须建立当前频道在文件中存在的全部日期，
-                    // 后续点击日期再从同一批 programme 按日期过滤，不能只保留今天。
                     String preservedDateKey = getSelectedKu9GuideDateKey();
                     rebuildKu9GuideDatesForChannel(cp);
+                    ku9GuideDateAdapter.notifyDataSetChanged();
                     if (ku9GuideDateAdapter.getItemCount() == 0) return;
                     int di = findKu9GuideDateIndex(preservedDateKey);
                     if (di < 0) di = findTodayGuideDateIndex();
                     if (di < 0) di = 0;
+                    di = Math.max(0, Math.min(di, ku9GuideDateAdapter.getItemCount() - 1));
                     ku9GuideDateAdapter.setSelectedIndex(di);
                     ku9GuideDateList.setSelection(di);
                     LiveEpgDate selectedDate = ku9GuideDateAdapter.getItem(di);
                     if (selectedDate != null) loadKu9GuidePrograms(cp, selectedDate.getDateParamVal());
-                    ku9GuideDateAdapter.notifyDataSetChanged();
                 });
             }
             @Override public void onError(String msg) {
@@ -2780,8 +2728,6 @@ public class LivePlayActivity extends BaseActivity {
         String channelName = item.getChannelName();
         List<Date> available = new ArrayList<>();
         try {
-            // 日期栏只显示“当前节目单频道”在 XMLTV 文件中实际存在的全部日期。
-            // 不能固定为今天，也不能因为其它频道有日期就给当前频道制造空日期。
             if (isXmlEpgAddress(epgStringAddress)) {
                 available.addAll(EpgManager.getInstance(this).getAvailableDatesForChannel(channelName));
             } else {
@@ -2799,7 +2745,6 @@ public class LivePlayActivity extends BaseActivity {
         String todayKey = md.format(todayCal.getTime());
 
         if (available.isEmpty()) {
-            // XMLTV 没有实际日期时不伪造“今天”；只有远程模板 EPG 才使用固定日期栏。
             if (!isXmlEpgAddress(epgStringAddress)) {
                 for (int i = -2; i <= 7; i++) {
                     Calendar d = (Calendar) todayCal.clone();
@@ -2870,8 +2815,6 @@ public class LivePlayActivity extends BaseActivity {
         String channel = item.getChannelName();
         String dateStr = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(date);
 
-        // 节目单必须以已经下载的 XMLTV EPG 为第一数据源，按“频道 + 自然日”筛选，
-        // 这样切换日期时不会继续显示前一天的缓存，也不会丢失 desc。
         ArrayList<Epginfo> list = new ArrayList<>();
         try {
             List<EpgManager.EpgProgram> downloaded = EpgManager.getInstance(this).getProgramsForChannelOnDate(channel, date);
@@ -2880,15 +2823,12 @@ public class LivePlayActivity extends BaseActivity {
                 for (EpgManager.EpgProgram p : downloaded) {
                     if (p == null || p.start == null || p.stop == null || !p.stop.after(p.start)) continue;
                     Epginfo info = createXmlEpgInfoFromProgram(p, index++);
-                    // XMLTV <desc> 原文完整保留，只去掉字段首尾无意义空白，不截断内容。
                     info.desc = p.description == null ? "" : p.description;
                     list.add(info);
                 }
             }
         } catch (Exception ignored) { }
 
-        // XMLTV 文件型 EPG：节目单只允许使用 epgche/epg.xml 的原始解析结果。
-        // 不再用旧的 EpgUtil/hsEpg 覆盖或补今天的数据，避免“明明文件有多天却只显示今天”。
         if (!isXmlEpgAddress(epgStringAddress) && list.isEmpty()) {
             try {
                 list = EpgUtil.loadEpgData(channel, dateStr, date);
@@ -2975,7 +2915,6 @@ public class LivePlayActivity extends BaseActivity {
             }
         }
 
-        // 先真正切换播放器，再同步节目单焦点和频道数据。
         boolean switched = playChannel(targetGroup, targetIndex, false);
         if (!switched) {
             FileLogger.write("LivePlay", "节目单换台失败: group=" + targetGroup + ", index=" + targetIndex + ", channel=" + item.getChannelName());
@@ -3001,8 +2940,6 @@ public class LivePlayActivity extends BaseActivity {
             keepDateKey = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(ku9GuideDateAdapter.getItem(oldDateIndex).getDateParamVal());
         }
         final String preservedDateKey = keepDateKey;
-        // 切换频道后，必须先把当前节目单所在频道组重新按需绑定到 XMLTV，
-        // 然后再读取该频道在 EPG 文件中的全部日期；不能继续沿用上一个频道的日期。
         if (isXmlEpgAddress(epgStringAddress)) {
             ArrayList<String> groupNames = new ArrayList<>();
             for (LiveChannelItem ci : newChannels) {
@@ -3041,9 +2978,6 @@ public class LivePlayActivity extends BaseActivity {
         refreshKu9GuideIfShowing();
     }
 
-    /**
-     * 当前频道重新绑定后，使用 XMLTV 中实际存在的全部日期；每个日期都从同一个本地 EPG 文件按需读取。
-     */
     private void loadGuideChannelAllDatesAndSelect(int channelPosition, String preferredDateKey) {
         if (!ku9GuideShowing || ku9GuideDateAdapter == null || ku9GuideChannelAdapter == null) return;
         rebuildKu9GuideDatesForChannel(channelPosition);
@@ -3081,7 +3015,6 @@ public class LivePlayActivity extends BaseActivity {
             if (ku9GuideProgramAdapter.getItemCount() == 0 && !isXmlEpgAddress(epgStringAddress)) {
                 getEpg(item.getDateParamVal());
             }
-            // XMLTV：上面已经按用户选择的具体日期加载完成，不再调用会重新决定日期的刷新逻辑。
         }
         ku9GuideDateList.setSelection(position);
     }
@@ -3148,7 +3081,6 @@ public class LivePlayActivity extends BaseActivity {
         }
         String shiyiUrl = currentLiveChannelItem.getUrl();
         if (now.compareTo(selectedData.startdateTime) < 0) {
-            // 未来节目
         } else if (canCurrentChannelCatchup()) {
             mHandler.removeCallbacks(mHideChannelListRun);
             mHandler.postDelayed(mHideChannelListRun, 100);
@@ -3706,12 +3638,10 @@ public class LivePlayActivity extends BaseActivity {
                         }
                     });
                 } else if (position == 1) {
-                    // 使用 EpgManager 刷新所有频道的 EPG
                     EpgManager.getInstance(this).refreshEpg(new EpgManager.RefreshCallback() {
                         @Override
                         public void onSuccess() {
                             Toast.makeText(LivePlayActivity.this, "EPG 更新成功", Toast.LENGTH_SHORT).show();
-                            // 刷新当前频道的 EPG 显示
                             if (channel_Name != null) {
                                 getEpg(new Date());
                             }
@@ -3744,7 +3674,6 @@ public class LivePlayActivity extends BaseActivity {
         mHandler.postDelayed(mHideSettingLayoutRun, postTimeout);
     }
 
-    // ========== 新增源管理对话框（美化的左右两栏布局） ==========
     private void showSourceManageDialog() {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setTitle("列表订阅");
@@ -3758,7 +3687,6 @@ public class LivePlayActivity extends BaseActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // 左侧：二维码 + 说明
         LinearLayout leftPanel = new LinearLayout(this);
         leftPanel.setOrientation(LinearLayout.VERTICAL);
         leftPanel.setGravity(Gravity.CENTER);
@@ -3784,7 +3712,6 @@ public class LivePlayActivity extends BaseActivity {
         Bitmap qrBitmap = QRCodeUtil.createQRCode(content, 180);
         if (qrBitmap != null) qrImage.setImageBitmap(qrBitmap);
 
-        // 右侧：列表 + 输入
         LinearLayout rightPanel = new LinearLayout(this);
         rightPanel.setOrientation(LinearLayout.VERTICAL);
         rightPanel.setPadding(20, 0, 0, 0);
@@ -3847,7 +3774,6 @@ public class LivePlayActivity extends BaseActivity {
         AlertDialog dialog = builder.create();
         dialog.getWindow().setBackgroundDrawable(new ColorDrawable(android.graphics.Color.TRANSPARENT));
 
-        // 适配器数据
         SharedPreferences prefs = App.getInstance().getSharedPreferences("live_source_pref", Context.MODE_PRIVATE);
         String json = prefs.getString("source_list", "[]");
         JsonArray sourceArray = JsonParser.parseString(json).getAsJsonArray();
@@ -4073,7 +3999,6 @@ public class LivePlayActivity extends BaseActivity {
                 return addr;
             }
         } catch (Exception e) {
-            /* ignore */
         }
         return "127.0.0.1";
     }
@@ -4091,7 +4016,6 @@ public class LivePlayActivity extends BaseActivity {
         return "直播";
     }
 
-    // ========== 其余方法（保持不变） ==========
     private void performUpdateSubscription() {
         String liveApiUrl = Hawk.get(HawkConfig.LIVE_API_URL, "");
         if (liveApiUrl.isEmpty()) {
@@ -4543,7 +4467,6 @@ public class LivePlayActivity extends BaseActivity {
         speedGroup.setLiveSettingItems(speedItems);
         liveSettingGroupList.add(speedGroup);
 
-        // 每次初始化都显式保证“台标来源”设置组存在，避免 API 配置列表覆盖后菜单消失。
         java.util.Iterator<LiveSettingGroup> logoIt = liveSettingGroupList.iterator();
         while (logoIt.hasNext()) {
             LiveSettingGroup g = logoIt.next();
@@ -4735,13 +4658,11 @@ public class LivePlayActivity extends BaseActivity {
         EpgManager manager = EpgManager.getInstance(this);
         manager.refreshEpg(new EpgManager.RefreshCallback() {
             @Override public void onSuccess() {
-                // 切换组期间请求可能已完成；只给“现在仍是当前组”的频道做台标预加载。
                 int activeGroup = currentChannelGroupIndex;
                 if (activeGroup != requestedGroup) requestedGroupPreload(activeGroup);
                 else requestedGroupPreload(requestedGroup);
             }
             @Override public void onError(String msg) {
-                // 网络不可用时仍使用已有本地 EPG/台标缓存，不影响播放。
                 requestedGroupPreload(currentChannelGroupIndex);
             }
         });
@@ -4762,6 +4683,7 @@ public class LivePlayActivity extends BaseActivity {
                 int cp = Math.max(0, Math.min(ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex, ku9GuideChannelAdapter.getItemCount() - 1));
                 String preservedDateKey = getSelectedKu9GuideDateKey();
                 rebuildKu9GuideDatesForChannel(cp);
+                ku9GuideDateAdapter.notifyDataSetChanged();
                 int di = findKu9GuideDateIndex(preservedDateKey);
                 if (di < 0) di = findTodayGuideDateIndex();
                 if (di >= 0) {
@@ -4984,9 +4906,6 @@ public class LivePlayActivity extends BaseActivity {
         return null;
     }
 
-    /** XMLTV programme 直接使用自身的真实开始日期构造 Epginfo，绝不拿当前选中的日期重写节目日期。
-     * 这样 09-11、09-12... 的节目不会因为节目单当前日期是 09-10 而被错误地放回今天。
-     */
     private Epginfo createXmlEpgInfoFromProgram(EpgManager.EpgProgram p, int index) {
         if (p == null || p.start == null || p.stop == null) return null;
         TimeZone tz = TimeZone.getTimeZone("GMT+8:00");
@@ -5221,7 +5140,6 @@ public class LivePlayActivity extends BaseActivity {
         void onConfirm(String value);
     }
 
-    // ========== 酷9手势 ==========
     private void initGestureDetector() {
         if (gestureOverlay == null) return;
         gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
@@ -5343,7 +5261,6 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private void handleScroll(MotionEvent e1, MotionEvent e2, float distanceX, float distanceY) {
-        // 可扩展音量调节
     }
 
     private void showBottomInfoBar() {
@@ -5380,7 +5297,6 @@ public class LivePlayActivity extends BaseActivity {
         if (tv_channelnum != null) tv_channelnum.setText(String.valueOf(currentLiveChannelItem.getChannelNum()));
         if (tip_chname != null) tip_chname.setText(currentLiveChannelItem.getChannelName());
 
-        // 更新 EPG 节目名称和描述
         Epginfo parsedCurrent = null, parsedNext = null;
         if (epgdata != null && !epgdata.isEmpty()) {
             int idx = findCurrentEpgIndex(epgdata);
@@ -5414,7 +5330,6 @@ public class LivePlayActivity extends BaseActivity {
             }
         }
 
-        // 更新描述
         if (tvDesc != null) {
             if (parsedCurrent != null && !TextUtils.isEmpty(parsedCurrent.desc)) {
                 tvDesc.setText(parsedCurrent.desc);
