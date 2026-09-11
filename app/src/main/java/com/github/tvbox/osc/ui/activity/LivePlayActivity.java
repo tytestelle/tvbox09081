@@ -1,7 +1,5 @@
 package com.github.tvbox.osc.ui.activity;
 
-// ===== 版本：ku9 节目单「焦点轮询」+ 台标 BitmapFactory 直读 =====
-
 import static xyz.doikki.videoplayer.util.PlayerUtils.safeTimeMs;
 
 import android.Manifest;
@@ -149,7 +147,6 @@ public class LivePlayActivity extends BaseActivity {
     public static Context context;
     private VideoView mVideoView;
 
-    // ========== 酷9手势与窗口 ==========
     private View gestureOverlay;
     private GestureDetector gestureDetector;
     private LinearLayout llBottomInfoBar;
@@ -175,7 +172,6 @@ public class LivePlayActivity extends BaseActivity {
     private TextView tvNetSpeed;
     private TextView tvResolution;
     private LinearLayout tvLeftChannelListLayout;
-    // 三列控件
     private TvRecyclerView mSourceListView;
     private TvRecyclerView mChannelGroupView;
     private TvRecyclerView mLiveChannelView;
@@ -183,7 +179,6 @@ public class LivePlayActivity extends BaseActivity {
     private LiveChannelGroupAdapter liveChannelGroupAdapter;
     private LiveChannelItemAdapter liveChannelItemAdapter;
 
-    // 酷9节目单独立窗口
     private View ku9ProgramGuide;
     private TvRecyclerView ku9GuideChannelList;
     private TvRecyclerView ku9GuideDateList;
@@ -194,7 +189,6 @@ public class LivePlayActivity extends BaseActivity {
     private boolean ku9GuideShowing = false;
     private boolean ku9GuideEpgLoadRequested = false;
 
-    // ===== 酷9日期栏轮询（绕过 TvRecyclerView 焦点机制） =====
     private int lastLoadedKu9DateFocusedPos = -1;
     private int lastLoadedKu9DateSelectedPos = -1;
     private final Runnable mKu9DateWatchRun = new Runnable() {
@@ -202,7 +196,6 @@ public class LivePlayActivity extends BaseActivity {
         public void run() {
             if (!ku9GuideShowing) return;
             if (ku9GuideDateAdapter != null && ku9GuideDateAdapter.getItemCount() > 0) {
-                // 优先取焦点子项位置；取不到时退回 selectedPosition
                 int pos = -1;
                 View focused = ku9GuideDateList == null ? null : ku9GuideDateList.getFocusedChild();
                 if (focused != null && ku9GuideDateList != null) {
@@ -235,7 +228,6 @@ public class LivePlayActivity extends BaseActivity {
         }
     };
 
-    // 直播断线自动重连：仅针对当前频道实例，换台/换源会使旧重连任务失效。
     private static final int LIVE_RECONNECT_MAX_RETRIES = Integer.MAX_VALUE;
     private static final long LIVE_RECONNECT_BASE_DELAY = 1500L;
     private int liveReconnectAttempts = 0;
@@ -622,7 +614,6 @@ public class LivePlayActivity extends BaseActivity {
         }
     }
 
-    // ========== 源列表相关方法 ==========
     private void initSourceListView() {
         if (mSourceListView == null) return;
         mSourceListView.setHasFixedSize(true);
@@ -1396,57 +1387,6 @@ public class LivePlayActivity extends BaseActivity {
         return new SimpleDateFormat("HH:mm", Locale.getDefault()).format(value);
     }
 
-    private void setDefaultBottomEpg(TextView currentProgramName, TextView nextProgramName) {
-        TimeZone timeZone = TimeZone.getTimeZone("GMT+8:00");
-        Calendar currentStart = Calendar.getInstance(timeZone);
-        currentStart.set(Calendar.MINUTE, 0);
-        currentStart.set(Calendar.SECOND, 0);
-        currentStart.set(Calendar.MILLISECOND, 0);
-        Calendar currentEnd = (Calendar) currentStart.clone();
-        currentEnd.add(Calendar.MINUTE, 59);
-        Calendar nextStart = (Calendar) currentEnd.clone();
-        nextStart.add(Calendar.MINUTE, 1);
-        Calendar nextEnd = (Calendar) nextStart.clone();
-        nextEnd.add(Calendar.MINUTE, 59);
-
-        SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm", Locale.getDefault());
-        timeFormat.setTimeZone(timeZone);
-        tip_epg1.setText(timeFormat.format(currentStart.getTime()) + "-" + timeFormat.format(currentEnd.getTime()));
-        if (currentProgramName != null) currentProgramName.setText("暂无节目预告");
-        tip_epg2.setText(timeFormat.format(nextStart.getTime()) + "-" + timeFormat.format(nextEnd.getTime()));
-        Epginfo current = null, next = null;
-        if (epgdata != null && !epgdata.isEmpty()) {
-            int idx = findCurrentEpgIndex(epgdata);
-            if (idx >= 0) {
-                current = epgdata.get(idx);
-                if (idx + 1 < epgdata.size()) next = epgdata.get(idx + 1);
-            }
-        }
-        if (current != null) {
-            if (tip_epg1 != null) tip_epg1.setText(current.start + "-" + current.end);
-            if (tvCurrentProgramName != null) tvCurrentProgramName.setText(current.title);
-            if (tvDesc != null) {
-                tvDesc.setText(TextUtils.isEmpty(current.desc) ? "暂无节目简介" : current.desc);
-                tvDesc.setVisibility(View.VISIBLE);
-            }
-        } else {
-            if (tip_epg1 != null) tip_epg1.setText("暂无当前节目");
-            if (tvCurrentProgramName != null) tvCurrentProgramName.setText("暂无当前节目");
-            if (tvDesc != null) { tvDesc.setText("暂无节目简介"); tvDesc.setVisibility(View.VISIBLE); }
-        }
-        if (next != null) {
-            if (tip_epg2 != null) tip_epg2.setText(next.start + "-" + next.end);
-            if (tvNextProgramName != null) tvNextProgramName.setText(next.title);
-        } else {
-            if (tip_epg2 != null) tip_epg2.setText("暂无节目预告");
-            if (tvNextProgramName != null) tvNextProgramName.setText("暂无节目预告");
-        }
-    }
-
-    /**
-     * XMLTV 模式下直接 BitmapFactory 读取处理后的透明 PNG，绕过 Glide 一切缓存；
-     * 同时显式清空 ImageView 自身及其父 View 的背景，避免透明 PNG 被父容器染白。
-     */
     private void updateCurrentChannelIcon() {
         if (channel_Name == null || channel_Name.getChannelName() == null) return;
         final String channelName = channel_Name.getChannelName();
@@ -1454,13 +1394,10 @@ public class LivePlayActivity extends BaseActivity {
         mHandler.post(() -> {
             final EpgManager epgManager = EpgManager.getInstance(this);
             if (isXmlEpgAddress(epgStringAddress)) {
-                // XMLTV：直接读处理后的 PNG 文件，绕过 Glide 缓存
                 epgManager.loadProcessedChannelIcon(channelName, file -> {
                     if (file == null || !file.exists()) return;
                     if (channel_Name == null || !channelName.equals(channel_Name.getChannelName())) return;
                     if (imgLiveIcon == null) return;
-                    // 显式清除 ImageView 自身背景，以及它所有父 View 的背景，
-                    // 确保透明 PNG 不会被白色父容器“染白”。
                     try {
                         imgLiveIcon.setBackground(null);
                         imgLiveIcon.setBackgroundColor(0x00000000);
@@ -1486,7 +1423,6 @@ public class LivePlayActivity extends BaseActivity {
                 });
                 return;
             }
-            // 非 XMLTV 情况保留原有逻辑
             String epgTagName = channelNameReal;
             String iconUrl = null;
             if (channel_Name.getChannelLogo() != null && !channel_Name.getChannelLogo().isEmpty()) {
@@ -1667,34 +1603,32 @@ public class LivePlayActivity extends BaseActivity {
                     return true;
                 }
 
-                // ===== 日期栏：UP/DOWN 直接切换日期并刷新右侧节目 =====
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
                     if (ku9GuideDateAdapter != null && ku9GuideDateAdapter.getItemCount() > 0) {
-                        int curPos = ku9GuideDateList.getSelectedPosition();
-                        if (curPos < 0) curPos = ku9GuideDateAdapter.getSelectedIndex();
-                        if (curPos < 0) curPos = 0;
+                        int cur = ku9GuideDateList.getSelectedPosition();
+                        if (cur < 0) cur = ku9GuideDateAdapter.getSelectedIndex();
+                        if (cur < 0) cur = findTodayGuideDateIndex();
+                        if (cur < 0) cur = 0;
                         int step = (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) ? 1 : -1;
-                        int newPos = curPos + step;
-                        newPos = Math.max(0, Math.min(newPos, ku9GuideDateAdapter.getItemCount() - 1));
-
-                        ku9GuideDateAdapter.setSelectedIndex(newPos);
-                        ku9GuideDateList.setSelection(newPos);
-                        ku9GuideDateList.setSelectedPosition(newPos);
-
-                        LiveEpgDate d = ku9GuideDateAdapter.getItem(newPos);
-                        if (d != null) {
-                            int cp = Math.max(0, Math.min(
-                                    ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
-                                    Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
-                            String dateStr = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(d.getDateParamVal());
-                            FileLogger.write("LivePlay", "日期栏UP/DOWN: newPos=" + newPos + " date=[" + dateStr + "]");
-                            loadKu9GuidePrograms(cp, d.getDateParamVal());
+                        int np = Math.max(0, Math.min(cur + step, ku9GuideDateAdapter.getItemCount() - 1));
+                        if (np != cur) {
+                            ku9GuideDateAdapter.setSelectedIndex(np);
+                            ku9GuideDateList.setSelection(np);
+                            ku9GuideDateList.setSelectedPosition(np);
+                            LiveEpgDate d = ku9GuideDateAdapter.getItem(np);
+                            if (d != null) {
+                                int cp = Math.max(0, Math.min(
+                                        ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
+                                        Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
+                                String ds = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(d.getDateParamVal());
+                                FileLogger.write("LivePlay", "dispatchKeyEvent切日期: pos=" + np + " date=[" + ds + "]");
+                                loadKu9GuidePrograms(cp, d.getDateParamVal());
+                            }
                         }
+                        return true;
                     }
-                    return true;
                 }
 
-                // 日期栏：确定键 -> 用当前 selected 位置重新加载
                 if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
                     int pos = ku9GuideDateList.getSelectedPosition();
                     if (pos < 0) pos = ku9GuideDateAdapter.getSelectedIndex();
@@ -1711,7 +1645,6 @@ public class LivePlayActivity extends BaseActivity {
                     return true;
                 }
 
-                // ---- 以下保留原有的左右切换逻辑 ----
                 if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && isFocusInView(ku9GuideProgramList)) {
                     ku9GuideDateList.requestFocus();
                     return true;
@@ -2145,32 +2078,6 @@ public class LivePlayActivity extends BaseActivity {
                 animator.start();
             }
         }
-    };
-
-    private void showChannelInfo() {
-        if (currentLiveChannelItem == null || tvChannelInfo == null) return;
-        tvChannelInfo.setText(String.format(Locale.getDefault(), "%d %s %s(%d/%d)", currentLiveChannelItem.getChannelNum(),
-                currentLiveChannelItem.getChannelName(), currentLiveChannelItem.getSourceName(),
-                currentLiveChannelItem.getSourceIndex() + 1, currentLiveChannelItem.getSourceNum()));
-
-        FrameLayout.LayoutParams lParams = new FrameLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        if (tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.VISIBLE) {
-            lParams.gravity = Gravity.LEFT;
-            lParams.leftMargin = 60;
-            lParams.topMargin = 30;
-        } else {
-            lParams.gravity = Gravity.RIGHT;
-            lParams.rightMargin = 60;
-            lParams.topMargin = 30;
-        }
-        tvChannelInfo.setLayoutParams(lParams);
-        tvChannelInfo.setVisibility(View.VISIBLE);
-        mHandler.removeCallbacks(mHideChannelInfoRun);
-        mHandler.postDelayed(mHideChannelInfoRun, 3000);
-    }
-
-    private Runnable mHideChannelInfoRun = () -> {
-        if (tvChannelInfo != null) tvChannelInfo.setVisibility(View.INVISIBLE);
     };
 
     private void initLiveObj() {
@@ -2712,28 +2619,24 @@ public class LivePlayActivity extends BaseActivity {
             }
         });
 
-        // 强制：焦点在日期栏时，按 UP/DOWN 立即切换节目列表（作为兜底）
-        ku9GuideDateList.setOnKeyListener((v, keyCode, event) -> {
-            if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                    ku9GuideDateList.postDelayed(() -> {
-                        if (!ku9GuideShowing || ku9GuideDateAdapter == null) return;
-                        int pos = ku9GuideDateList.getSelectedPosition();
-                        if (pos < 0 || pos >= ku9GuideDateAdapter.getItemCount()) {
-                            pos = ku9GuideDateAdapter.getSelectedIndex();
-                        }
-                        if (pos < 0 || pos >= ku9GuideDateAdapter.getItemCount()) return;
+        // ===== 触摸/鼠标点击支持：adapter 级 click =====
+        ku9GuideDateAdapter.setOnItemClickListener((adapter, view, position) -> {
+            selectKu9GuideDate(position);
+        });
 
+        // ===== 触摸/鼠标点击支持：TvRecyclerView 上直接拦截触摸事件兜底 =====
+        ku9GuideDateList.setOnTouchListener((v, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_UP) {
+                View child = ku9GuideDateList.findChildViewUnder(event.getX(), event.getY());
+                if (child != null) {
+                    int pos = ku9GuideDateList.getChildAdapterPosition(child);
+                    if (pos >= 0 && pos < ku9GuideDateAdapter.getItemCount()) {
+                        selectKu9GuideDate(pos);
+                        // 同步焦点和选中位置，避免滚动/焦点跳变
+                        ku9GuideDateList.setSelectedPosition(pos);
                         ku9GuideDateAdapter.setSelectedIndex(pos);
-                        LiveEpgDate d = ku9GuideDateAdapter.getItem(pos);
-                        if (d == null) return;
-
-                        int cp = Math.max(0, Math.min(
-                                ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
-                                Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
-                        FileLogger.write("LivePlay", "日期栏UP/DOWN: pos=" + pos + " -> loadKu9GuidePrograms");
-                        loadKu9GuidePrograms(cp, d.getDateParamVal());
-                    }, 30);
+                        return true;
+                    }
                 }
             }
             return false;
@@ -2747,6 +2650,11 @@ public class LivePlayActivity extends BaseActivity {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { ku9GuideProgramAdapter.setFocusedIndex(-1); }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) { ku9GuideProgramAdapter.setFocusedIndex(position); }
             @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { clickEpgItem(position); }
+        });
+
+        // 补上 programAdapter 级 click（触屏/鼠标直接点节目列表也能触发回看/切换）
+        ku9GuideProgramAdapter.setOnItemClickListener((adapter, view, position) -> {
+            clickEpgItem(position);
         });
     }
 
@@ -2801,7 +2709,6 @@ public class LivePlayActivity extends BaseActivity {
             ku9GuideChannelGroupButton.bringToFront();
         }
 
-        // ===== 启动轮询：绕过 TvRecyclerView 的 onItemSelected =====
         lastLoadedKu9DateFocusedPos = -1;
         lastLoadedKu9DateSelectedPos = -1;
         mHandler.removeCallbacks(mKu9DateWatchRun);
@@ -3184,14 +3091,15 @@ public class LivePlayActivity extends BaseActivity {
     private void selectKu9GuideDate(int position) {
         if (ku9GuideDateAdapter == null || position < 0 || position >= ku9GuideDateAdapter.getData().size()) return;
         ku9GuideDateAdapter.setSelectedIndex(position);
-        if (liveEpgDateAdapter != null && position < liveEpgDateAdapter.getItemCount()) liveEpgDateAdapter.setSelectedIndex(position);
+        if (liveEpgDateAdapter != null && position < liveEpgDateAdapter.getItemCount()) {
+            liveEpgDateAdapter.setSelectedIndex(position);
+        }
         LiveEpgDate item = ku9GuideDateAdapter.getItem(position);
         if (item != null) {
-            int channelPos = Math.max(0, ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex);
+            int channelPos = Math.max(0, Math.min(
+                    ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
+                    Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
             loadKu9GuidePrograms(channelPos, item.getDateParamVal());
-            if (ku9GuideProgramAdapter.getItemCount() == 0 && !isXmlEpgAddress(epgStringAddress)) {
-                getEpg(item.getDateParamVal());
-            }
         }
         ku9GuideDateList.setSelection(position);
     }
