@@ -1091,11 +1091,15 @@ public class EpgManager {
     }
 
     /**
-     * 台标背景透明化。
+     * 台标背景透明化（V2）。
      *
-     * 参考电脑端脚本：四角 + 四条边采样背景色；但 Android 版进一步采用“边缘连通”
-     * 处理。这样既能把白色/灰色/JPG 压缩后的背景全部去掉，又不会把台标内部的白色
-     * 文字、白色图案误删。透明化只从图片边缘向内扩散，最终统一保存为 ARGB PNG。
+     * 针对 JPG 有损压缩白底残留问题做了如下改进：
+     * 1. 全局背景色估计：不再只用四边采样，而是统计整张图中出现频率最高的“浅色簇”，
+     *    避免边缘像素本身被 JPG 污染时采错背景色。
+     * 2. 多级背景判定：边缘连通时使用宽松阈值（穿透 JPG 色偏），配合“浅色/中性灰”
+     *    辅助判定，避免过度侵蚀前景。
+     * 3. 增强抗锯齿：对非背景但接近背景色的浅灰过渡像素赋予部分透明度，让边缘平滑
+     *    融入，消除一圈白色残留。
      */
     private String readSmallText(File file) {
         if (file == null || !file.isFile()) return "";
@@ -1122,89 +1126,164 @@ public class EpgManager {
         int[] pixels = new int[width * height];
         result.getPixels(pixels, 0, width, 0, 0, width, height);
 
-        // 透明化采用“多背景色 + 边缘连通 + 抗锯齿”三层处理。
-        // 关键点：背景必须从图片边缘进入，避免把台标内部本身的白色文字/图形误删。
-        HashMap<Integer,Integer> clusters = new HashMap<>();
-        ArrayList<Integer> samples = new ArrayList<>();
-        int sx = Math.max(1, width / 32), sy = Math.max(1, height / 32);
-        for (int x=0; x<width; x+=sx) { addBackgroundSample(samples,pixels,width,height,x,0); addBackgroundSample(samples,pixels,width,height,x,height-1); }
-        for (int y=0; y<height; y+=sy) { addBackgroundSample(samples,pixels,width,height,0,y); addBackgroundSample(samples,pixels,width,height,width-1,y); }
-        addBackgroundSample(samples,pixels,width,height,0,0); addBackgroundSample(samples,pixels,width,height,width-1,0);
-        addBackgroundSample(samples,pixels,width,height,0,height-1); addBackgroundSample(samples,pixels,width,height,width-1,height-1);
-        for (Integer c : samples) {
-            if (c == null || Color.alpha(c) == 0) continue;
-            int r=Color.red(c)>>3, g=Color.green(c)>>3, b=Color.blue(c)>>3;
-            int key=(r<<10)|(g<<5)|b; clusters.put(key, clusters.containsKey(key)?clusters.get(key)+1:1);
+        // ========== 1. 全局背景色估计 ==========
+        // 统计整张图中出现频率最高的“浅色簇”，而非仅取边缘像素。
+        // 这样即使边缘像素被 JPG 压缩污染，也能找到真正的背景色。
+        HashMap<Integer, Integer> lightClusters = new HashMap<>();
+        for (int i = 0; i < pixels.length; i++) {
+            int c = pixels[i];
+            if (Color.alpha(c) == 0) continue;
+            int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
+            int max = Math.max(r, Math.max(g, b));
+            int min = Math.min(r, Math.min(g, b));
+            // 只统计“接近白色”的像素（亮度高且接近中性灰）
+            if (max >= 200 && (max - min) <= 40) {
+                int rr = r >> 3, gg = g >> 3, bb = b >> 3;
+                int key = (rr << 10) | (gg << 5) | bb;
+                lightClusters.put(key, lightClusters.containsKey(key) ? lightClusters.get(key) + 1 : 1);
+            }
         }
-        ArrayList<Integer> keys=new ArrayList<>(clusters.keySet());
-        Collections.sort(keys,(a,b)->Integer.compare(clusters.get(b),clusters.get(a)));
-        if (keys.isEmpty()) keys.add((31<<10)|(31<<5)|31);
-        int n=Math.min(6,keys.size());
-        int[] br=new int[n], bg=new int[n], bb=new int[n];
-        for(int i=0;i<n;i++){int k=keys.get(i);br[i]=Math.min(255,((k>>10)&31)*8+4);bg[i]=Math.min(255,((k>>5)&31)*8+4);bb[i]=Math.min(255,(k&31)*8+4);}
+        // 如果图中没有足够的浅色像素，回退到边缘采样
+        ArrayList<Integer> bgSamples = new ArrayList<>();
+        if (lightClusters.size() >= 3) {
+            ArrayList<Integer> sortedKeys = new ArrayList<>(lightClusters.keySet());
+            Collections.sort(sortedKeys, (a, b) -> Integer.compare(lightClusters.get(b), lightClusters.get(a)));
+            int n = Math.min(6, sortedKeys.size());
+            for (int i = 0; i < n; i++) {
+                int k = sortedKeys.get(i);
+                int r = Math.min(255, ((k >> 10) & 31) * 8 + 4);
+                int g = Math.min(255, ((k >> 5) & 31) * 8 + 4);
+                int b = Math.min(255, (k & 31) * 8 + 4);
+                bgSamples.add(Color.rgb(r, g, b));
+            }
+        } else {
+            // 回退：从四边采样
+            int sx = Math.max(1, width / 32), sy = Math.max(1, height / 32);
+            for (int x = 0; x < width; x += sx) {
+                addBackgroundSample(bgSamples, pixels, width, height, x, 0);
+                addBackgroundSample(bgSamples, pixels, width, height, x, height - 1);
+            }
+            for (int y = 0; y < height; y += sy) {
+                addBackgroundSample(bgSamples, pixels, width, height, 0, y);
+                addBackgroundSample(bgSamples, pixels, width, height, width - 1, y);
+            }
+        }
+        if (bgSamples.isEmpty()) bgSamples.add(Color.WHITE);
+        int nBg = bgSamples.size();
+        int[] br = new int[nBg], bg = new int[nBg], bb = new int[nBg];
+        for (int i = 0; i < nBg; i++) {
+            int c = bgSamples.get(i);
+            br[i] = Color.red(c);
+            bg[i] = Color.green(c);
+            bb[i] = Color.blue(c);
+        }
 
+        // ========== 2. 边缘连通区域标记（带多级阈值） ==========
         boolean[] transparent = new boolean[pixels.length];
-        // 旧实现使用固定 int[] 队列，但同一个像素在“标记透明”之前可能被相邻
-        // 节点重复入队，tail 最终超过 pixels.length，导致：
-        // ArrayIndexOutOfBoundsException: length=N; index=N
-        // 这正是潘朵啦台标处理失败的异常。改为 ArrayDeque，并在入队时立即标记，
-        // 保证每个像素最多入队一次，同时不改变透明化规则。
         java.util.ArrayDeque<Integer> queue = new java.util.ArrayDeque<>();
-        // 四条边全部作为种子；背景色允许 65 的 RGB 距离，覆盖白/米白/浅灰及 JPEG/缩放色偏。
-        for(int x=0;x<width;x++){
-            int top=x;
-            if(!transparent[top]) { transparent[top]=true; queue.add(top); }
-            if(height>1){
-                int bottom=(height-1)*width+x;
-                if(!transparent[bottom]) { transparent[bottom]=true; queue.add(bottom); }
+
+        // 四条边全部作为种子
+        for (int x = 0; x < width; x++) {
+            int top = x;
+            if (!transparent[top]) { transparent[top] = true; queue.add(top); }
+            if (height > 1) {
+                int bottom = (height - 1) * width + x;
+                if (!transparent[bottom]) { transparent[bottom] = true; queue.add(bottom); }
             }
         }
-        for(int y=1;y<height-1;y++){
-            int left=y*width;
-            if(!transparent[left]) { transparent[left]=true; queue.add(left); }
-            if(width>1){
-                int right=y*width+width-1;
-                if(!transparent[right]) { transparent[right]=true; queue.add(right); }
+        for (int y = 1; y < height - 1; y++) {
+            int left = y * width;
+            if (!transparent[left]) { transparent[left] = true; queue.add(left); }
+            if (width > 1) {
+                int right = y * width + width - 1;
+                if (!transparent[right]) { transparent[right] = true; queue.add(right); }
             }
         }
-        while(!queue.isEmpty()){
-            int idx=queue.removeFirst();
-            int c=pixels[idx];
-            if(Color.alpha(c)==0) continue;
-            int r=Color.red(c),g=Color.green(c),b=Color.blue(c);
-            int min2=Integer.MAX_VALUE;
-            for(int j=0;j<n;j++){int dr=r-br[j],dg=g-bg[j],db=b-bb[j];int d2=dr*dr+dg*dg+db*db;if(d2<min2)min2=d2;}
-            if(min2>65*65){
-                // 这个边缘像素不是背景：取消它的临时访问标记。它的邻居也不能从这里
-                // 继续向内扩散。后面的全图阶段仍会根据颜色/抗锯齿规则处理它。
-                transparent[idx]=false;
+
+        // 多级阈值：第一级宽松（85），第二级收紧（55），第三级严格（35）
+        // 这样既能穿透 JPG 色偏，又不会过度侵蚀前景
+        final int[] thresholds2 = {85 * 85, 55 * 55, 35 * 35};
+
+        while (!queue.isEmpty()) {
+            int idx = queue.removeFirst();
+            int c = pixels[idx];
+            if (Color.alpha(c) == 0) continue;
+            int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
+
+            int minDist2 = Integer.MAX_VALUE;
+            for (int j = 0; j < nBg; j++) {
+                int dr = r - br[j], dg = g - bg[j], db = b - bb[j];
+                int d2 = dr * dr + dg * dg + db * db;
+                if (d2 < minDist2) minDist2 = d2;
+            }
+
+            // 多级判定：距离小于宽松阈值 → 认为是背景
+            boolean isBg = false;
+            if (minDist2 <= thresholds2[0]) {
+                int max = Math.max(r, Math.max(g, b));
+                int min = Math.min(r, Math.min(g, b));
+                int spread = max - min;
+                if (minDist2 <= thresholds2[2]) {
+                    isBg = true; // 非常接近背景色
+                } else if (minDist2 <= thresholds2[1]) {
+                    isBg = true; // 比较接近
+                } else {
+                    // 宽松阈值内，但要求是浅色或接近中性
+                    if (max >= 180 && spread <= 50) isBg = true;
+                }
+            }
+
+            if (!isBg) {
+                transparent[idx] = false;
                 continue;
             }
-            int x=idx%width,y=idx/width;
-            if(x>0 && !transparent[idx-1]) { transparent[idx-1]=true; queue.add(idx-1); }
-            if(x+1<width && !transparent[idx+1]) { transparent[idx+1]=true; queue.add(idx+1); }
-            if(y>0 && !transparent[idx-width]) { transparent[idx-width]=true; queue.add(idx-width); }
-            if(y+1<height && !transparent[idx+width]) { transparent[idx+width]=true; queue.add(idx+width); }
+
+            int x = idx % width, y = idx / width;
+            if (x > 0 && !transparent[idx - 1]) { transparent[idx - 1] = true; queue.add(idx - 1); }
+            if (x + 1 < width && !transparent[idx + 1]) { transparent[idx + 1] = true; queue.add(idx + 1); }
+            if (y > 0 && !transparent[idx - width]) { transparent[idx - width] = true; queue.add(idx - width); }
+            if (y + 1 < height && !transparent[idx + width]) { transparent[idx + width] = true; queue.add(idx + width); }
         }
 
-        int removed=0;
-        for(int i=0;i<pixels.length;i++){
-            int c=pixels[i]; if(Color.alpha(c)==0) { transparent[i]=true; continue; }
-            int r=Color.red(c),g=Color.green(c),b=Color.blue(c);
-            int min2=Integer.MAX_VALUE;
-            for(int j=0;j<n;j++){int dr=r-br[j],dg=g-bg[j],db=b-bb[j];int d2=dr*dr+dg*dg+db*db;if(d2<min2)min2=d2;}
-            if(transparent[i]) { pixels[i]=Color.argb(0,r,g,b); removed++; continue; }
-            // 边缘背景的抗锯齿残留也透明化：仅限与背景接近的中性浅色像素。
-            int spread=Math.max(r,Math.max(g,b))-Math.min(r,Math.min(g,b));
-            if(min2<=42*42 && spread<=35){
-                double d=Math.sqrt(min2);
-                int a=(int)(255.0*(d-24.0)/18.0);
-                a=Math.max(0,Math.min(255,a));
-                if(a<255){pixels[i]=Color.argb(a,r,g,b);removed++;}
+        // ========== 3. 全图处理：透明化 + 抗锯齿边缘 ==========
+        int removed = 0;
+        for (int i = 0; i < pixels.length; i++) {
+            int c = pixels[i];
+            if (Color.alpha(c) == 0) { transparent[i] = true; continue; }
+            int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
+
+            int minDist2 = Integer.MAX_VALUE;
+            for (int j = 0; j < nBg; j++) {
+                int dr = r - br[j], dg = g - bg[j], db = b - bb[j];
+                int d2 = dr * dr + dg * dg + db * db;
+                if (d2 < minDist2) minDist2 = d2;
+            }
+
+            if (transparent[i]) {
+                pixels[i] = Color.argb(0, r, g, b);
+                removed++;
+                continue;
+            }
+
+            // 抗锯齿边缘处理：对非背景但接近背景色的像素赋予部分透明度
+            // 使用更宽松的条件，覆盖 JPG 产生的浅灰过渡像素
+            int spread = Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b));
+            if (minDist2 <= 60 * 60 && spread <= 60) {
+                // 计算部分透明度：距离背景越近越透明
+                double d = Math.sqrt(minDist2);
+                // alpha 从 0（距离 0）到 255（距离 60）
+                int a = (int) (255.0 * (d - 15.0) / 45.0);
+                a = Math.max(0, Math.min(255, a));
+                if (a < 255) {
+                    pixels[i] = Color.argb(a, r, g, b);
+                    removed++;
+                }
             }
         }
-        result.setPixels(pixels,0,width,0,0,width,height);
-        FileLogger.write(TAG,"台标透明化完成(多背景+边缘连通): "+width+"x"+height+" candidates="+n+" transparent="+removed);
+
+        result.setPixels(pixels, 0, width, 0, 0, width, height);
+        FileLogger.write(TAG, "台标透明化完成(全局背景估计+多级阈值): " + width + "x" + height
+                + " bgColors=" + nBg + " transparent=" + removed);
         return result;
     }
 
