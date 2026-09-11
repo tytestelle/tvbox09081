@@ -1115,88 +1115,33 @@ public class EpgManager {
         int[] pixels = new int[width * height];
         result.getPixels(pixels, 0, width, 0, 0, width, height);
 
-        // ===== 1. 全局浅色簇背景色估计 =====
-        HashMap<Integer, Integer> lightClusters = new HashMap<>();
-        for (int i = 0; i < pixels.length; i++) {
-            int c = pixels[i];
-            if (Color.alpha(c) == 0) continue;
-            int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
-            int max = Math.max(r, Math.max(g, b));
-            int min = Math.min(r, Math.min(g, b));
-            if (max >= 180 && (max - min) <= 60) {
-                int rr = r >> 3, gg = g >> 3, bb = b >> 3;
-                int key = (rr << 10) | (gg << 5) | bb;
-                lightClusters.put(key, lightClusters.containsKey(key) ? lightClusters.get(key) + 1 : 1);
-            }
-        }
-        ArrayList<Integer> bgSamples = new ArrayList<>();
-        if (!lightClusters.isEmpty()) {
-            ArrayList<Integer> sortedKeys = new ArrayList<>(lightClusters.keySet());
-            Collections.sort(sortedKeys, (a, b) -> Integer.compare(lightClusters.get(b), lightClusters.get(a)));
-            int n = Math.min(8, sortedKeys.size());
-            for (int i = 0; i < n; i++) {
-                int k = sortedKeys.get(i);
-                int r = Math.min(255, ((k >> 10) & 31) * 8 + 4);
-                int g = Math.min(255, ((k >> 5) & 31) * 8 + 4);
-                int b = Math.min(255, (k & 31) * 8 + 4);
-                bgSamples.add(Color.rgb(r, g, b));
-            }
-        }
-        // 无论统计结果如何都加入纯白/近白作为锚点
-        bgSamples.add(Color.WHITE);
-        bgSamples.add(Color.rgb(248, 248, 248));
-        bgSamples.add(Color.rgb(252, 252, 252));
-        int nBg = bgSamples.size();
-        int[] br = new int[nBg], bg = new int[nBg], bb = new int[nBg];
-        for (int i = 0; i < nBg; i++) {
-            int c = bgSamples.get(i);
-            br[i] = Color.red(c); bg[i] = Color.green(c); bb[i] = Color.blue(c);
-        }
-
-        // ===== 2. 逐像素判定 =====
-        // 完整透明：距背景 <= 50
-        // 渐变：50~130 之间线性 alpha
-        // 兜底：max >= 190 且 spread <= 45 的浅中性色直接透明（覆盖 JPG 压缩后残留的浅灰/米白）
-        final int fullTransDist2 = 50 * 50;
-        final int gradEndDist2   = 130 * 130;
         int transparent = 0;
-
         for (int i = 0; i < pixels.length; i++) {
             int c = pixels[i];
             if (Color.alpha(c) == 0) { transparent++; continue; }
             int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
+            int max = Math.max(r, Math.max(g, b));
+            int min = Math.min(r, Math.min(g, b));
+            int spread = max - min;
 
-            int minDist2 = Integer.MAX_VALUE;
-            for (int j = 0; j < nBg; j++) {
-                int dr = r - br[j], dg = g - bg[j], db = b - bb[j];
-                int d2 = dr * dr + dg * dg + db * db;
-                if (d2 < minDist2) minDist2 = d2;
+            if (max >= 235 && spread <= 20) {
+                pixels[i] = Color.argb(0, r, g, b); transparent++; continue;
             }
-
-            if (minDist2 <= fullTransDist2) {
-                pixels[i] = Color.argb(0, r, g, b);
-                transparent++;
-            } else if (minDist2 <= gradEndDist2) {
-                double d = Math.sqrt(minDist2);
-                // 50 处 alpha=0，130 处 alpha=255
-                int alpha = (int) (255.0 * (d - 50.0) / 80.0);
-                alpha = Math.max(0, Math.min(255, alpha));
-                pixels[i] = Color.argb(alpha, r, g, b);
-                if (alpha < 255) transparent++;
-            } else {
-                int max = Math.max(r, Math.max(g, b));
-                int min = Math.min(r, Math.min(g, b));
-                int spread = max - min;
-                if (max >= 190 && spread <= 45) {
-                    pixels[i] = Color.argb(0, r, g, b);
-                    transparent++;
-                }
+            if (max >= 215 && spread <= 35) {
+                pixels[i] = Color.argb(0, r, g, b); transparent++; continue;
+            }
+            if (max >= 195 && spread <= 50) {
+                pixels[i] = Color.argb(0, r, g, b); transparent++; continue;
+            }
+            if (max >= 175 && spread <= 60) {
+                int alpha = (int) (100 + (max - 175) * 120 / 20.0);
+                alpha = Math.max(60, Math.min(230, alpha));
+                pixels[i] = Color.argb(alpha, r, g, b); transparent++; continue;
             }
         }
 
         result.setPixels(pixels, 0, width, 0, 0, width, height);
-        FileLogger.write(TAG, "台标透明化完成V5: " + width + "x" + height
-                + " bgColors=" + nBg + " transparent=" + transparent);
+        FileLogger.write(TAG, "台标透明化完成V6(纯白底特化): " + width + "x" + height + " transparent=" + transparent);
         return result;
     }
 
