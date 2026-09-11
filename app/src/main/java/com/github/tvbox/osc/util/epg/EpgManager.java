@@ -1115,7 +1115,7 @@ public class EpgManager {
         int[] pixels = new int[width * height];
         result.getPixels(pixels, 0, width, 0, 0, width, height);
 
-        // ===== 1. 全局背景色估计：统计浅色簇 =====
+        // ===== 1. 全局浅色簇背景色估计 =====
         HashMap<Integer, Integer> lightClusters = new HashMap<>();
         for (int i = 0; i < pixels.length; i++) {
             int c = pixels[i];
@@ -1142,8 +1142,10 @@ public class EpgManager {
                 bgSamples.add(Color.rgb(r, g, b));
             }
         }
-        // 无条件把纯白也加入参考背景色，保证任何白底图都有"锚点"
+        // 无论统计结果如何都加入纯白/近白作为锚点
         bgSamples.add(Color.WHITE);
+        bgSamples.add(Color.rgb(248, 248, 248));
+        bgSamples.add(Color.rgb(252, 252, 252));
         int nBg = bgSamples.size();
         int[] br = new int[nBg], bg = new int[nBg], bb = new int[nBg];
         for (int i = 0; i < nBg; i++) {
@@ -1152,14 +1154,18 @@ public class EpgManager {
         }
 
         // ===== 2. 逐像素判定 =====
-        final int fullTransDist2 = 25 * 25;   // <=25：完全透明
-        final int gradEndDist2   = 75 * 75;   // 25~75：线性渐变；>75：走浅中性色兜底
+        // 完整透明：距背景 <= 50
+        // 渐变：50~130 之间线性 alpha
+        // 兜底：max >= 190 且 spread <= 45 的浅中性色直接透明（覆盖 JPG 压缩后残留的浅灰/米白）
+        final int fullTransDist2 = 50 * 50;
+        final int gradEndDist2   = 130 * 130;
         int transparent = 0;
 
         for (int i = 0; i < pixels.length; i++) {
             int c = pixels[i];
             if (Color.alpha(c) == 0) { transparent++; continue; }
             int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
+
             int minDist2 = Integer.MAX_VALUE;
             for (int j = 0; j < nBg; j++) {
                 int dr = r - br[j], dg = g - bg[j], db = b - bb[j];
@@ -1172,17 +1178,16 @@ public class EpgManager {
                 transparent++;
             } else if (minDist2 <= gradEndDist2) {
                 double d = Math.sqrt(minDist2);
-                int alpha = (int) (255.0 * (d - 25.0) / 50.0);
+                // 50 处 alpha=0，130 处 alpha=255
+                int alpha = (int) (255.0 * (d - 50.0) / 80.0);
                 alpha = Math.max(0, Math.min(255, alpha));
                 pixels[i] = Color.argb(alpha, r, g, b);
                 if (alpha < 255) transparent++;
             } else {
-                // 兜底：JPG 压缩白底经常在 200–240 之间飘，且接近中性色。
-                // 只要像素"足够浅且足够中性"，就把它当作背景彻底透明化。
                 int max = Math.max(r, Math.max(g, b));
                 int min = Math.min(r, Math.min(g, b));
                 int spread = max - min;
-                if (max >= 200 && spread <= 30) {
+                if (max >= 190 && spread <= 45) {
                     pixels[i] = Color.argb(0, r, g, b);
                     transparent++;
                 }
@@ -1190,7 +1195,7 @@ public class EpgManager {
         }
 
         result.setPixels(pixels, 0, width, 0, 0, width, height);
-        FileLogger.write(TAG, "台标透明化完成V4(简单白底): " + width + "x" + height
+        FileLogger.write(TAG, "台标透明化完成V5: " + width + "x" + height
                 + " bgColors=" + nBg + " transparent=" + transparent);
         return result;
     }
