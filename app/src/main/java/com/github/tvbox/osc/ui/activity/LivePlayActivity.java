@@ -2601,15 +2601,18 @@ public class LivePlayActivity extends BaseActivity {
         List<LiveChannelItem> channels = getLiveChannels(currentChannelGroupIndex);
         ku9GuideChannelAdapter.setNewData(channels != null ? channels : new ArrayList<>());
         preloadCurrentGroupEpgResources(currentChannelGroupIndex);
+
         int selected = Math.max(0, currentLiveChannelIndex);
         if (selected >= ku9GuideChannelAdapter.getItemCount()) selected = 0;
         if (ku9GuideChannelAdapter.getItemCount() > 0) {
             ku9GuideChannelAdapter.setSelectedIndex(ku9GuideChannelAdapter.getData().get(selected).getChannelIndex());
             ku9GuideChannelList.setSelection(selected);
         }
+        // lambda 捕获的局部变量必须是 effectively final，所以这里用 final 副本
+        final int selectedChannelPos = selected;
 
         // 先用已有数据同步构建日期栏；即使 EPG 尚未加载完成，也会用固定日期兜底
-        rebuildKu9GuideDatesForChannel(selected);
+        rebuildKu9GuideDatesForChannel(selectedChannelPos);
         if (ku9GuideDateAdapter != null) ku9GuideDateAdapter.notifyDataSetChanged();
         ku9GuideDateList.post(() -> {
             if (ku9GuideDateAdapter == null) return;
@@ -2621,13 +2624,13 @@ public class LivePlayActivity extends BaseActivity {
                 ku9GuideDateList.setSelection(di);
                 if (ku9GuideChannelAdapter.getItemCount() > 0) {
                     LiveEpgDate selectedDate = ku9GuideDateAdapter.getItem(di);
-                    if (selectedDate != null) loadKu9GuidePrograms(selected, selectedDate.getDateParamVal());
+                    if (selectedDate != null) loadKu9GuidePrograms(selectedChannelPos, selectedDate.getDateParamVal());
                 }
             }
         });
 
         // 打开节目单时再做一次 hash 检查：hash 变化才下载，随后用真实 EPG 日期刷新日期栏
-        ensureKu9GuideEpgLoaded(selected);
+        ensureKu9GuideEpgLoaded(selectedChannelPos);
 
         if (ku9GuideChannelGroupButton != null) {
             ku9GuideChannelGroupButton.setVisibility(View.VISIBLE);
