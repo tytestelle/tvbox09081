@@ -3888,13 +3888,12 @@ public class LivePlayActivity extends BaseActivity {
         mHandler.postDelayed(mHideSettingLayoutRun, postTimeout);
     }
 
-    // ★ 修改点：纯 Java 重写列表订阅 UI（图二效果），并添加置顶功能
+    // ====== 列表订阅 UI（纯 Java，无 XML，使用 Unicode 图标） ======
     private void showSourceManageDialog() {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setTitle("列表订阅");
         builder.setCancelable(true);
 
-        // ===== 主布局：水平排列（左二维码，右列表） =====
         LinearLayout mainLayout = new LinearLayout(this);
         mainLayout.setOrientation(LinearLayout.HORIZONTAL);
         mainLayout.setPadding(dp(20), dp(20), dp(20), dp(20));
@@ -3905,7 +3904,6 @@ public class LivePlayActivity extends BaseActivity {
         mainLayout.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // ===== 左侧：二维码和提示 =====
         LinearLayout leftPanel = new LinearLayout(this);
         leftPanel.setOrientation(LinearLayout.VERTICAL);
         leftPanel.setGravity(Gravity.CENTER);
@@ -3933,7 +3931,6 @@ public class LivePlayActivity extends BaseActivity {
         Bitmap qrBitmap = QRCodeUtil.createQRCode(content, qrSize);
         if (qrBitmap != null) qrImage.setImageBitmap(qrBitmap);
 
-        // ===== 右侧：列表和输入区域 =====
         LinearLayout rightPanel = new LinearLayout(this);
         rightPanel.setOrientation(LinearLayout.VERTICAL);
         rightPanel.setPadding(dp(15), 0, 0, 0);
@@ -4061,7 +4058,6 @@ public class LivePlayActivity extends BaseActivity {
         SourceItem(String n, String u) { name = n; url = u; }
     }
 
-    // ★ 修改点：重写 Adapter，增加置顶、删除、复制图标按钮
     class SourceAdapter extends BaseAdapter {
         private Context context;
         private List<SourceItem> data;
@@ -4097,29 +4093,35 @@ public class LivePlayActivity extends BaseActivity {
                 tvName.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                 itemLayout.addView(tvName);
 
-                ImageView btnCopy = new ImageView(context);
-                btnCopy.setImageResource(android.R.drawable.ic_menu_copy);
-                btnCopy.setColorFilter(0xFFFFFFFF);
+                TextView btnCopy = new TextView(context);
+                btnCopy.setText("📋");
+                btnCopy.setTextSize(20);
+                btnCopy.setTextColor(0xFFFFFFFF);
+                btnCopy.setGravity(Gravity.CENTER);
                 btnCopy.setPadding(dp(6), dp(6), dp(6), dp(6));
-                LinearLayout.LayoutParams copyLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+                LinearLayout.LayoutParams copyLp = new LinearLayout.LayoutParams(dp(36), dp(36));
                 copyLp.setMargins(dp(6), 0, dp(6), 0);
                 btnCopy.setLayoutParams(copyLp);
                 itemLayout.addView(btnCopy);
 
-                ImageView btnDelete = new ImageView(context);
-                btnDelete.setImageResource(android.R.drawable.ic_menu_delete);
-                btnDelete.setColorFilter(0xFFFF5555);
+                TextView btnDelete = new TextView(context);
+                btnDelete.setText("🗑️");
+                btnDelete.setTextSize(20);
+                btnDelete.setTextColor(0xFFFF5555);
+                btnDelete.setGravity(Gravity.CENTER);
                 btnDelete.setPadding(dp(6), dp(6), dp(6), dp(6));
-                LinearLayout.LayoutParams delLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+                LinearLayout.LayoutParams delLp = new LinearLayout.LayoutParams(dp(36), dp(36));
                 delLp.setMargins(dp(6), 0, dp(6), 0);
                 btnDelete.setLayoutParams(delLp);
                 itemLayout.addView(btnDelete);
 
-                ImageView btnTop = new ImageView(context);
-                btnTop.setImageResource(android.R.drawable.ic_menu_upload);
-                btnTop.setColorFilter(0xFFFFFFFF);
+                TextView btnTop = new TextView(context);
+                btnTop.setText("⬆️");
+                btnTop.setTextSize(20);
+                btnTop.setTextColor(0xFFFFFFFF);
+                btnTop.setGravity(Gravity.CENTER);
                 btnTop.setPadding(dp(6), dp(6), dp(6), dp(6));
-                LinearLayout.LayoutParams topLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+                LinearLayout.LayoutParams topLp = new LinearLayout.LayoutParams(dp(36), dp(36));
                 topLp.setMargins(dp(6), 0, 0, 0);
                 btnTop.setLayoutParams(topLp);
                 itemLayout.addView(btnTop);
@@ -4179,8 +4181,8 @@ public class LivePlayActivity extends BaseActivity {
 
     static class ViewHolder {
         TextView tvName;
-        ImageView btnCopy, btnDelete, btnTop;
-        ViewHolder(TextView tvName, ImageView btnCopy, ImageView btnDelete, ImageView btnTop) {
+        TextView btnCopy, btnDelete, btnTop;
+        ViewHolder(TextView tvName, TextView btnCopy, TextView btnDelete, TextView btnTop) {
             this.tvName = tvName;
             this.btnCopy = btnCopy;
             this.btnDelete = btnDelete;
@@ -4577,8 +4579,8 @@ public class LivePlayActivity extends BaseActivity {
                 && currentLiveChannelItem.getSourceIndex() < currentLiveChannelItem.getChannelUrls().size();
     }
 
+    // ★ 修改点：始终返回全部菜单，不过滤任何功能
     private int getDefaultSettingGroupIndex() {
-        // ★ 修改点：始终默认选中第一个菜单组，保证全功能菜单的默认行为一致
         return 0;
     }
 
