@@ -91,13 +91,9 @@ public class EpgManager {
     private final Map<String, ChannelInfo> channelsByDisplayName = new HashMap<>();
     private final Map<String, ChannelInfo> channelsById = new HashMap<>();
     private final Map<String, List<EpgProgram>> programsByChannelId = new HashMap<>();
-    // 当前频道组：epgid -> XMLTV 中所有完全匹配的 channel id。
     private final Map<String, List<String>> xmlChannelIdsByEpgId = new HashMap<>();
-    // epgid -> 当前频道组中该 epgid 对应的全部 programme。直接按 epgid 查询，避免代表 channel id 丢节目。
     private final Map<String, List<EpgProgram>> programsByEpgId = new HashMap<>();
-    // epgid -> XMLTV 精确匹配得到的首个有效 icon src。
     private final Map<String, String> iconUrlByEpgId = new HashMap<>();
-    // 仅保存当前频道组已按需加载的 XMLTV 频道，切换分组时释放上一组，避免整份 EPG 常驻内存。
     private final Set<String> loadedEpgIds = new HashSet<>();
     private static final String LOGO_PREFS = "logo_settings";
     private static final String LOGO_SOURCE_KEY = "xmltv_logo_source";
@@ -168,7 +164,6 @@ public class EpgManager {
         }
     }
 
-    /** 原始频道名称只做 epg_data.json name 的精确匹配，不再做模糊/包含匹配。 */
     private String getEpgIdByChannelName(String channelName) {
         if (TextUtils.isEmpty(channelName)) return null;
         synchronized (nameToEpgId) {
@@ -176,11 +171,6 @@ public class EpgManager {
         }
     }
 
-    /**
-     * EPG 唯一映射入口：
-     * 原始频道名 -> epg_data.json name -> epgid。
-     * XMLTV display-name -> channel id -> programme 由解析索引继续完成。
-     */
     public String resolveEpgId(String originalChannelName) {
         return getEpgIdByChannelName(originalChannelName);
     }
@@ -267,13 +257,11 @@ public class EpgManager {
             String localHash = readText(localHashFile);
             FileLogger.write(TAG, "EPG hash: remote=" + (TextUtils.isEmpty(remoteHash) ? "<empty>" : remoteHash) + ", local=" + (TextUtils.isEmpty(localHash) ? "<empty>" : localHash));
 
-            // HASH 未变化：只确认本地 EPG 文件存在，绝不在启动/刷新阶段解析整个 XML。
             if (!TextUtils.isEmpty(remoteHash) && epgFile.exists() && remoteHash.equals(localHash)) {
                 FileLogger.write(TAG, "EPG hash 未变化，直接使用本地文件（不解析全量 XML）: " + epgFile.getAbsolutePath());
                 return RefreshResult.ok();
             }
 
-            // hash 服务器临时不可用，但本地 XML 存在时，不影响播放/节目单。
             if (TextUtils.isEmpty(remoteHash) && epgFile.exists()) {
                 FileLogger.write(TAG, "EPG hash 获取失败，继续使用已有 EPG 本地文件（不全量解析）");
                 return RefreshResult.ok();
@@ -284,15 +272,12 @@ public class EpgManager {
             downloadXmlToFile(url, tmp);
             if (!tmp.exists() || tmp.length() == 0) return RefreshResult.error("EPG 文件下载为空");
 
-            // 不在下载完成时解析整份 XML。仅完成文件替换；真正的 XMLTV 数据
-            // 在用户进入/切换频道组时，按当前组的 epgid 懒加载。
             if (!tmp.renameTo(epgFile)) {
                 copyFile(tmp, epgFile);
                 tmp.delete();
             }
             if (!TextUtils.isEmpty(remoteHash)) writeTextAtomically(localHashFile, remoteHash);
 
-            // 新文件生效后，释放上一版本的按组缓存。下一次进入频道组再解析。
             synchronized (parseLock) {
                 channelsByDisplayName.clear();
                 channelsById.clear();
@@ -307,7 +292,6 @@ public class EpgManager {
             return RefreshResult.ok();
         } catch (Exception e) {
             FileLogger.write(TAG, "EPG 刷新异常", e);
-            // 下载失败绝不能破坏现有缓存。
             if (epgFile.exists()) return ensureParsed();
             return RefreshResult.error("EPG 刷新失败");
         }
@@ -339,7 +323,6 @@ public class EpgManager {
             }
         }
 
-        // 下载的是 .gz 时，解压成真正的 XMLTV 文件；否则保持原 XML。
         if (isGzip(target)) {
             File xmlTmp = new File(epgDir, EPG_FILE_NAME + ".unzipped.tmp");
             try (GZIPInputStream in = new GZIPInputStream(new FileInputStream(target));
@@ -361,9 +344,6 @@ public class EpgManager {
         }
     }
 
-    /**
-     * 兼容旧调用：现在不再执行全量 XML 解析，只检查本地 EPG 文件是否存在。
-     */
     private RefreshResult ensureParsed() {
         if (!epgFile.exists() || epgFile.length() == 0) {
             return RefreshResult.error("没有 EPG 缓存文件");
@@ -371,19 +351,6 @@ public class EpgManager {
         return RefreshResult.ok();
     }
 
-    /**
-     * 按需解析一个频道组。
-     *
-     * 重要：这里仍然需要顺序扫描 XMLTV 文件才能定位 programme，但只把
-     * 当前频道组对应的 channel/programme 放入内存；绝不建立“全频道节目单”。
-     * 切换分组前会清空上一组缓存，因此内存占用与当前组大小相关。
-     *
-     * 关键修复：XMLTV 中的 <display-name> 可能是 epg_data.json 的 name 变体
-     * （例如 "CCTV-1"、"央视一套"），而 requestedEpgIds 里保存的是 epgid
-     * （例如 "CCTV1"）。因此必须先把 display-name 通过 nameToEpgId 映射成
-     * epgid，再判断该 epgid 是否在 requestedEpgIds 中，否则只能命中与 epgid
-     * 完全同名的那个变体，导致同一个 epgid 下其它变体的多天节目被丢弃。
-     */
     private boolean parseXmlForEpgIds(File file, Set<String> requestedEpgIds) {
         if (requestedEpgIds == null || requestedEpgIds.isEmpty()) return true;
         synchronized (parseLock) {
@@ -394,12 +361,6 @@ public class EpgManager {
                 final Map<String, List<String>> idsByEpgId = new HashMap<>();
                 final Set<String> wantedXmlChannelIds = new HashSet<>();
 
-                /*
-                 * 第一遍只解析 <channel>。
-                 * 必须先把“epgid -> 所有 XML channel id”完整建立起来，再解析 programme。
-                 * 这样无论 XMLTV 是先写 programme 后写 channel，还是同一频道存在多个
-                 * <channel id>，都不会漏掉其它日期的节目。
-                 */
                 XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
                 XmlPullParser parser = factory.newPullParser();
                 try (InputStream input = new FileInputStream(file)) {
@@ -425,15 +386,11 @@ public class EpgManager {
                             if (!TextUtils.isEmpty(channelId)) {
                                 String matchedEpgId = null;
                                 for (String displayName : displayNames) {
-                                    // 【关键修复】先通过 epg_data.json 的 name 映射把 XMLTV 的
-                                    // display-name 转成 epgid，再判断该 epgid 是否是当前组请求的。
                                     String mappedEpgId = getEpgIdByChannelName(displayName);
                                     if (mappedEpgId != null && requestedEpgIds.contains(mappedEpgId)) {
                                         matchedEpgId = mappedEpgId;
                                         break;
                                     }
-                                    // 兜底：某些 XMLTV 直接使用 epgid 作为 display-name，
-                                    // 也要能匹配上（此时 nameToEpgId 可能未收录该 display-name）。
                                     if (requestedEpgIds.contains(displayName)) {
                                         matchedEpgId = displayName;
                                         break;
@@ -442,14 +399,12 @@ public class EpgManager {
                                 if (matchedEpgId != null) {
                                     ChannelInfo info = new ChannelInfo(channelId, matchedEpgId, icon);
                                     newById.put(channelId, info);
-                                    // 同 epgid 多个 channel id：全部保留。
                                     List<String> ids = idsByEpgId.get(matchedEpgId);
                                     if (ids == null) {
                                         ids = new ArrayList<>();
                                         idsByEpgId.put(matchedEpgId, ids);
                                     }
                                     if (!ids.contains(channelId)) ids.add(channelId);
-                                    // newByName 只需要一个代表 ChannelInfo；programme 查询会读取该 epgid 的合并列表。
                                     ChannelInfo representative = newByName.get(matchedEpgId);
                                     if (representative == null || (TextUtils.isEmpty(representative.iconUrl) && !TextUtils.isEmpty(icon))) {
                                         newByName.put(matchedEpgId, info);
@@ -467,7 +422,6 @@ public class EpgManager {
                     }
                 }
 
-                // 第二遍解析 programme。此时 wantedXmlChannelIds 已完整，任何日期/顺序都能收集。
                 parser = factory.newPullParser();
                 try (InputStream input = new FileInputStream(file)) {
                     parser.setInput(input, null);
@@ -489,7 +443,6 @@ public class EpgManager {
                             } else if ("title".equals(tag) && programChannel != null) {
                                 title = readElementText(parser);
                             } else if ("desc".equals(tag) && programChannel != null) {
-                                // 不 trim、不截断，完整保留 XMLTV <desc>。
                                 desc = readElementText(parser);
                             }
                         } else if (event == XmlPullParser.END_TAG && "programme".equals(tag)) {
@@ -518,8 +471,6 @@ public class EpgManager {
                     }
                 }
 
-                // 一个 epgid 对应的全部 XMLTV channel id 的 programme 全部合并，直接建立 epgid 索引。
-                // 后续任何查询都只走 epgid -> programme，不再经过“代表 channel id”，彻底避免漏节目。
                 final Map<String, List<EpgProgram>> newProgramsByEpgId = new HashMap<>();
                 for (Map.Entry<String, List<String>> entry : idsByEpgId.entrySet()) {
                     String epgid = entry.getKey();
@@ -576,9 +527,6 @@ public class EpgManager {
         }
     }
 
-    /**
-     * 异步加载指定频道组。切换组时释放上一组节目缓存。
-     */
     public void loadChannelGroup(final List<String> channelNames, final Runnable onComplete) {
         if (channelNames == null || channelNames.isEmpty()) {
             if (onComplete != null) mainHandler.post(onComplete);
@@ -587,8 +535,6 @@ public class EpgManager {
 
         final Set<String> requested = new HashSet<>();
         for (String name : channelNames) {
-            // 只有原始频道名称在 epg_data.json 的 name 列表中“精准命中”
-            // 才允许进入 EPG 映射；未命中即视为没有该频道 EPG。
             String epgid = getEpgIdByChannelName(name);
             if (!TextUtils.isEmpty(epgid)) requested.add(epgid);
         }
@@ -608,7 +554,6 @@ public class EpgManager {
                     }
                 }
 
-                // 台标也只处理当前组。
                 for (String channelName : channelNames) {
                     if (TextUtils.isEmpty(channelName)) continue;
                     String epgid = getEpgIdByChannelName(channelName);
@@ -627,19 +572,13 @@ public class EpgManager {
         });
     }
 
-    /**
-     * 只预加载当前频道组的 EPG 台标。不会在 XML 解析完成时遍历整个文件下载全部台标，
-     * 从而避免首次进入直播页产生大量网络任务和内存压力。
-     */
     public void preloadGroupResources(List<String> channelNames, Runnable onComplete) {
         loadChannelGroup(channelNames, onComplete);
     }
 
-    // ======================== 查询：原始频道名 -> epgid -> XMLTV channel id ========================
     public List<EpgProgram> getProgramsForChannel(String channelName) {
         List<EpgProgram> result = new ArrayList<>();
         if (TextUtils.isEmpty(channelName)) return result;
-        // 未完成当前频道组 XMLTV 解析时不输出“映射失败”，避免把异步加载过程误报成数据错误。
         if (!parsed) return result;
         String epgid = getEpgIdByChannelName(channelName);
         if (TextUtils.isEmpty(epgid)) {
@@ -663,12 +602,10 @@ public class EpgManager {
         return result;
     }
 
-    /** LogoManager 专用：严格返回“原始频道名 -> epg_data.json name -> epgid”，不做任何模糊匹配。 */
     public String getEpgIdByChannelNameForLogo(String channelName) {
         return getEpgIdByChannelName(channelName);
     }
 
-    /** LogoManager 专用：严格返回 epgid 对应 XMLTV channel 的 icon src。 */
     public String getChannelIconUrlForLogo(String channelName) {
         return getChannelIconUrl(channelName);
     }
@@ -685,15 +622,10 @@ public class EpgManager {
         }
     }
 
-    /**
-     * 兼容旧调用。为了杜绝旧白底 PNG 被 UI 直接显示，这里不再同步返回本地文件；
-     * 调用方应统一使用 loadProcessedChannelIcon()，等透明化完成后再显示。
-     */
     public File getProcessedChannelIconFile(String channelName) {
         return null;
     }
 
-    /** 异步获取处理后的透明台标；本地已有文件立即回调，没有则后台下载处理完成后回调。 */
     public void loadProcessedChannelIcon(final String channelName, final IconCallback callback) {
         if (TextUtils.isEmpty(channelName)) {
             if (callback != null) mainHandler.post(() -> callback.onIcon(null));
@@ -717,7 +649,6 @@ public class EpgManager {
             return;
         }
         if (target.exists() && target.length() > 0 && LOGO_SOURCE_EPG.equals(readSmallText(sourceMark))) {
-            // 旧缓存也统一做一次透明化，避免黑底/白底残留。
             iconExecutor.execute(() -> {
                 try { makeExistingIconTransparent(target); } catch (Exception e) { FileLogger.write(TAG, "本地台标检查失败: " + epgid, e); }
                 mainHandler.post(() -> { if (callback != null) callback.onIcon(target.exists() ? target : null); });
@@ -732,7 +663,6 @@ public class EpgManager {
         scheduleIconDownload(epgid, iconUrl, callback);
     }
 
-    /** 切换台标来源后强制当前 epgid.png 按新来源重新获取。 */
     public void clearLogoSourceCache() {
         if (!logoDir.exists()) return;
         File[] files = logoDir.listFiles();
@@ -750,7 +680,6 @@ public class EpgManager {
         void onIcon(File file);
     }
 
-    /** 返回 XMLTV 文件中该频道实际存在的全部自然日期。 */
     public List<Date> getAvailableDatesForChannel(String channelName) {
         List<Date> result = new ArrayList<>();
         List<EpgProgram> programs = getProgramsForChannel(channelName);
@@ -803,13 +732,6 @@ public class EpgManager {
         } catch (Exception ignored) { }
     }
 
-    /**
-     * 按 GMT+8 的自然日读取 XMLTV 节目。一个跨午夜的 programme 会出现在它覆盖的两个日期中，
-     * 因此切换日期时不会出现“文件里有数据但节目单为空”。
-     */
-    /** 返回当前频道按严格映射得到的全部 XMLTV programme，不按日期截断。
-     * 节目单日期栏和每个日期的节目列表都从这份完整快照派生。
-     */
     public List<EpgProgram> getAllProgramsForChannel(String channelName) {
         return getProgramsForChannel(channelName);
     }
@@ -839,7 +761,6 @@ public class EpgManager {
         return result;
     }
 
-    /** XMLTV 文件中的全部自然日，供节目单日期栏使用。 */
     public boolean isEpgParsed() {
         return parsed && !channelsById.isEmpty();
     }
@@ -876,7 +797,7 @@ public class EpgManager {
         return null;
     }
 
-    // ======================== 台标：下载到 files/logos/epgid.png，并做透明背景 ========================
+    // ======================== 台标 ========================
     private void scheduleGithubIconDownload(final String epgid, final File target, final File sourceMark, final IconCallback callback) {
         if (TextUtils.isEmpty(epgid)) { if (callback != null) mainHandler.post(() -> callback.onIcon(null)); return; }
         final String key = "GITHUB:" + epgid;
@@ -924,7 +845,6 @@ public class EpgManager {
         }
         final File target = new File(logoDir, epgid + ".png");
         if (!iconInFlight.add(epgid)) {
-            // 已有任务正在下载：用主线程定时检查，绝不占用 iconExecutor，避免并发台标任务互相等待。
             if (callback != null) {
                 final Runnable[] checker = new Runnable[1];
                 checker[0] = () -> {
@@ -942,7 +862,6 @@ public class EpgManager {
         }
         iconExecutor.execute(() -> {
             try {
-                // 本地优先：已有台标先直接检查/透明化，不访问网络。
                 if (target.exists() && target.length() > 0) {
                     makeExistingIconTransparent(target);
                 } else {
@@ -960,7 +879,6 @@ public class EpgManager {
         });
     }
 
-    /** 只处理本地文件，不重新下载。使用独立临时文件并校验，避免 Android 文件系统出现 .tmp ENOENT。 */
     private void makeExistingIconTransparent(File target) {
         if (target == null || !target.exists() || target.length() <= 0) return;
         Bitmap bitmap = null;
@@ -975,8 +893,6 @@ public class EpgManager {
             transparent = makeTransparent(bitmap);
             if (transparent == null) throw new java.io.IOException("透明化结果为空");
 
-            // 不依赖 File.createTempFile/renameTo 的特殊行为。直接建立同目录隐藏临时文件，
-            // 写完并再次解码验证后再替换目标，避免出现“临时 PNG 未生成”。
             tmp = new File(target.getParentFile(), target.getName() + ".tmp_" + System.nanoTime());
             if (tmp.exists()) tmp.delete();
             try (FileOutputStream out = new FileOutputStream(tmp, false)) {
@@ -996,8 +912,6 @@ public class EpgManager {
             File backup = new File(target.getParentFile(), target.getName() + ".bak");
             if (backup.exists()) backup.delete();
             if (!target.renameTo(backup)) {
-                // 某些 Android 文件系统 rename 失败时，直接删除旧文件再安装新文件。
-                // 新文件已经完成校验，因此不会留下半成品。
                 if (!target.delete() && target.exists()) throw new java.io.IOException("无法替换旧台标");
             }
             boolean installed = tmp.renameTo(target);
@@ -1019,24 +933,6 @@ public class EpgManager {
             if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
             if (transparent != null && !transparent.isRecycled()) transparent.recycle();
         }
-    }
-
-    private boolean hasTransparency(File file) {
-        try {
-            Bitmap b = BitmapFactory.decodeFile(file.getAbsolutePath());
-            if (b == null) return false;
-            if (b.getConfig() == Bitmap.Config.RGB_565) { b.recycle(); return false; }
-            int w = b.getWidth(), h = b.getHeight();
-            int stepX = Math.max(1, w / 32), stepY = Math.max(1, h / 32);
-            boolean transparent = false;
-            for (int y = 0; y < h && !transparent; y += stepY) {
-                for (int x = 0; x < w; x += stepX) {
-                    if (Color.alpha(b.getPixel(x, y)) < 255) { transparent = true; break; }
-                }
-            }
-            b.recycle();
-            return transparent;
-        } catch (Exception ignored) { return false; }
     }
 
     private void downloadAndProcessIcon(String epgid, String iconUrl, File target) {
@@ -1107,18 +1003,25 @@ public class EpgManager {
         } catch (Exception e) { FileLogger.write(TAG, "台标来源标记写入失败: " + file, e); }
     }
 
+    /**
+     * V7：关键修复 —— 从零创建 ARGB_8888 Bitmap 并显式 setHasAlpha(true)。
+     * 之前 src.copy(...) 会继承 JPG 解码后 hasAlpha=false 标志，导致
+     * PNG 编码器不写 alpha 通道，透明像素被当作白色。
+     */
     private Bitmap makeTransparent(Bitmap src) {
         if (src == null) return null;
-        Bitmap result = src.copy(Bitmap.Config.ARGB_8888, true);
-        if (result == null) return null;
-        final int width = result.getWidth(), height = result.getHeight();
+        final int width = src.getWidth(), height = src.getHeight();
+        // 关键：从零创建 ARGB_8888 bitmap，并显式声明 hasAlpha=true，
+        // 否则 JPG 解码出来的 bitmap（hasAlpha=false）会让 PNG 编码器丢弃 alpha 通道。
+        Bitmap result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        result.setHasAlpha(true);
+
         int[] pixels = new int[width * height];
-        result.getPixels(pixels, 0, width, 0, 0, width, height);
+        src.getPixels(pixels, 0, width, 0, 0, width, height);
 
         int transparent = 0;
         for (int i = 0; i < pixels.length; i++) {
             int c = pixels[i];
-            if (Color.alpha(c) == 0) { transparent++; continue; }
             int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
             int max = Math.max(r, Math.max(g, b));
             int min = Math.min(r, Math.min(g, b));
@@ -1141,7 +1044,15 @@ public class EpgManager {
         }
 
         result.setPixels(pixels, 0, width, 0, 0, width, height);
-        FileLogger.write(TAG, "台标透明化完成V6(纯白底特化): " + width + "x" + height + " transparent=" + transparent);
+        result.setHasAlpha(true);  // 双保险
+
+        // 打印四角 alpha 便于验证
+        int tl = Color.alpha(pixels[0]);
+        int tr = Color.alpha(pixels[width - 1]);
+        int bl = Color.alpha(pixels[(height - 1) * width]);
+        int br = Color.alpha(pixels[height * width - 1]);
+        FileLogger.write(TAG, "台标透明化完成V7: " + width + "x" + height
+                + " transparent=" + transparent + " 四角alpha=[" + tl + "," + tr + "," + bl + "," + br + "]");
         return result;
     }
 
@@ -1197,7 +1108,6 @@ public class EpgManager {
         int r = Color.red(color), g = Color.green(color), b = Color.blue(color);
         int dr = r - br, dg = g - bg, db = b - bb;
         if (dr * dr + dg * dg + db * db <= tolerance2) return true;
-        // 白/灰底 JPG 压缩：允许较大的亮度漂移，但要求仍接近中性。
         int max = Math.max(r, Math.max(g, b));
         int min = Math.min(r, Math.min(g, b));
         int neutral = max - min;
@@ -1246,9 +1156,6 @@ public class EpgManager {
         return keys.toString();
     }
 
-    /** 读取 XMLTV 元素中的完整文本，兼容 CDATA/实体以及元素内部存在嵌套标签的情况。
-     * 调用后 parser 停留在该元素对应的 END_TAG。
-     */
     private static String readElementText(XmlPullParser parser) throws Exception {
         StringBuilder sb = new StringBuilder();
         final int startDepth = parser.getDepth();
@@ -1273,7 +1180,6 @@ public class EpgManager {
             if (zone.isEmpty()) zone = "+0800";
             SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmmss Z", Locale.US);
             sdf.setLenient(false);
-            // XMLTV 常见格式：20260823000000 +0800
             return sdf.parse(main + " " + zone);
         } catch (Exception first) {
             try {
