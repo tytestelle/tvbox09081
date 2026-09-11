@@ -1414,7 +1414,8 @@ public class LivePlayActivity extends BaseActivity {
                         if (liveIconNullText != null) liveIconNullText.setVisibility(View.INVISIBLE);
                         com.bumptech.glide.Glide.with(LivePlayActivity.this)
                                 .load(file)
-                                .signature(new com.bumptech.glide.signature.ObjectKey(file.lastModified()))
+                                .diskCacheStrategy(com.bumptech.glide.load.engine.DiskCacheStrategy.NONE)
+                                .skipMemoryCache(true)
                                 .dontAnimate()
                                 .into(imgLiveIcon);
                     }
@@ -1463,7 +1464,8 @@ public class LivePlayActivity extends BaseActivity {
             if (local != null && local.exists()) {
                 com.bumptech.glide.Glide.with(this)
                         .load(local)
-                        .signature(new com.bumptech.glide.signature.ObjectKey(local.lastModified()))
+                        .diskCacheStrategy(com.bumptech.glide.load.engine.DiskCacheStrategy.NONE)
+                        .skipMemoryCache(true)
                         .dontAnimate()
                         .into(imgLiveIcon);
             } else {
@@ -1473,7 +1475,8 @@ public class LivePlayActivity extends BaseActivity {
                         if (file != null && file.exists() && imgLiveIcon != null) {
                             com.bumptech.glide.Glide.with(LivePlayActivity.this)
                                     .load(file)
-                                    .signature(new com.bumptech.glide.signature.ObjectKey(file.lastModified()))
+                                    .diskCacheStrategy(com.bumptech.glide.load.engine.DiskCacheStrategy.NONE)
+                                    .skipMemoryCache(true)
                                     .dontAnimate()
                                     .into(imgLiveIcon);
                         }
@@ -1598,6 +1601,52 @@ public class LivePlayActivity extends BaseActivity {
                     hideKu9ProgramGuide();
                     return true;
                 }
+
+                // ===== 日期栏：UP/DOWN 直接切换日期并刷新右侧节目 =====
+                if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    if (ku9GuideDateAdapter != null && ku9GuideDateAdapter.getItemCount() > 0) {
+                        int curPos = ku9GuideDateList.getSelectedPosition();
+                        if (curPos < 0) curPos = ku9GuideDateAdapter.getSelectedIndex();
+                        if (curPos < 0) curPos = 0;
+                        int step = (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) ? 1 : -1;
+                        int newPos = curPos + step;
+                        newPos = Math.max(0, Math.min(newPos, ku9GuideDateAdapter.getItemCount() - 1));
+
+                        ku9GuideDateAdapter.setSelectedIndex(newPos);
+                        ku9GuideDateList.setSelection(newPos);
+                        ku9GuideDateList.setSelectedPosition(newPos);
+
+                        LiveEpgDate d = ku9GuideDateAdapter.getItem(newPos);
+                        if (d != null) {
+                            int cp = Math.max(0, Math.min(
+                                    ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
+                                    Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
+                            String dateStr = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(d.getDateParamVal());
+                            FileLogger.write("LivePlay", "日期栏UP/DOWN: newPos=" + newPos + " date=[" + dateStr + "]");
+                            loadKu9GuidePrograms(cp, d.getDateParamVal());
+                        }
+                    }
+                    return true;
+                }
+
+                // 日期栏：确定键 -> 用当前 selected 位置重新加载
+                if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+                    int pos = ku9GuideDateList.getSelectedPosition();
+                    if (pos < 0) pos = ku9GuideDateAdapter.getSelectedIndex();
+                    if (pos >= 0 && pos < ku9GuideDateAdapter.getItemCount()) {
+                        ku9GuideDateAdapter.setSelectedIndex(pos);
+                        LiveEpgDate d = ku9GuideDateAdapter.getItem(pos);
+                        if (d != null) {
+                            int cp = Math.max(0, Math.min(
+                                    ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
+                                    Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
+                            loadKu9GuidePrograms(cp, d.getDateParamVal());
+                        }
+                    }
+                    return true;
+                }
+
+                // ---- 以下保留原有的左右切换逻辑 ----
                 if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && isFocusInView(ku9GuideProgramList)) {
                     ku9GuideDateList.requestFocus();
                     return true;
@@ -2581,7 +2630,6 @@ public class LivePlayActivity extends BaseActivity {
                 ku9GuideDateAdapter.setFocusedIndex(position);
                 if (position >= 0 && position < ku9GuideDateAdapter.getItemCount()) {
                     ku9GuideDateAdapter.setSelectedIndex(position);
-                    // 焦点一移动就立即加载，让节目单不会停留在“今天”
                     if (ku9GuideShowing) {
                         LiveEpgDate d = ku9GuideDateAdapter.getItem(position);
                         if (d != null) {
@@ -2598,11 +2646,10 @@ public class LivePlayActivity extends BaseActivity {
             }
         });
 
-        // 强制：焦点在日期栏时，按 UP/DOWN 立即切换节目列表
+        // 强制：焦点在日期栏时，按 UP/DOWN 立即切换节目列表（保留作为兜底）
         ku9GuideDateList.setOnKeyListener((v, keyCode, event) -> {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                    // 等 TV RecyclerView 完成选中位置更新
                     ku9GuideDateList.postDelayed(() -> {
                         if (!ku9GuideShowing || ku9GuideDateAdapter == null) return;
                         int pos = ku9GuideDateList.getSelectedPosition();
@@ -2662,10 +2709,8 @@ public class LivePlayActivity extends BaseActivity {
             ku9GuideChannelAdapter.setSelectedIndex(ku9GuideChannelAdapter.getData().get(selected).getChannelIndex());
             ku9GuideChannelList.setSelection(selected);
         }
-        // lambda 捕获的局部变量必须是 effectively final，所以这里用 final 副本
         final int selectedChannelPos = selected;
 
-        // 先用已有数据同步构建日期栏；即使 EPG 尚未加载完成，也会用固定日期兜底
         rebuildKu9GuideDatesForChannel(selectedChannelPos);
         if (ku9GuideDateAdapter != null) ku9GuideDateAdapter.notifyDataSetChanged();
         ku9GuideDateList.post(() -> {
@@ -2683,7 +2728,6 @@ public class LivePlayActivity extends BaseActivity {
             }
         });
 
-        // 打开节目单时再做一次 hash 检查：hash 变化才下载，随后用真实 EPG 日期刷新日期栏
         ensureKu9GuideEpgLoaded(selectedChannelPos);
 
         if (ku9GuideChannelGroupButton != null) {
@@ -2718,12 +2762,10 @@ public class LivePlayActivity extends BaseActivity {
                     cp = Math.max(0, Math.min(cp, ku9GuideChannelAdapter.getItemCount() - 1));
 
                     String preservedDateKey = getSelectedKu9GuideDateKey();
-                    // EPG 已解析完成，这里会拿到真实日期；如果仍为空，会走 rebuild 里的固定日期兜底
                     rebuildKu9GuideDatesForChannel(cp);
                     if (ku9GuideDateAdapter != null) ku9GuideDateAdapter.notifyDataSetChanged();
                     if (ku9GuideDateAdapter.getItemCount() == 0) return;
 
-                    // 让 UI 先完成一次布局，再设置选中项并触发节目列表刷新
                     ku9GuideDateList.post(() -> {
                         if (!ku9GuideShowing || ku9GuideDateAdapter == null) return;
                         int di = findKu9GuideDateIndex(preservedDateKey);
@@ -2734,7 +2776,6 @@ public class LivePlayActivity extends BaseActivity {
                         ku9GuideDateList.setSelection(di);
                         LiveEpgDate selectedDate = ku9GuideDateAdapter.getItem(di);
                         if (selectedDate != null) {
-                            // 强制立即加载当前选中日期的节目列表
                             int cpFinal = Math.max(0, Math.min(
                                     ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
                                     ku9GuideChannelAdapter.getItemCount() - 1));
@@ -2813,7 +2854,6 @@ public class LivePlayActivity extends BaseActivity {
         String todayKey = md.format(todayCal.getTime());
 
         if (available.isEmpty()) {
-            // EPG 尚未解析完成时先用固定范围占位；解析完成后 ensureKu9GuideEpgLoaded 会再次重建
             for (int i = -2; i <= 7; i++) {
                 Calendar d = (Calendar) todayCal.clone();
                 d.add(Calendar.DAY_OF_MONTH, i);
