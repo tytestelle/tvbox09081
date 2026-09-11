@@ -117,6 +117,7 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Hashtable;
@@ -1411,7 +1412,11 @@ public class LivePlayActivity extends BaseActivity {
                         imgLiveIcon.setVisibility(View.VISIBLE);
                         if (liveIconNullBg != null) liveIconNullBg.setVisibility(View.INVISIBLE);
                         if (liveIconNullText != null) liveIconNullText.setVisibility(View.INVISIBLE);
-                        com.bumptech.glide.Glide.with(LivePlayActivity.this).load(file).dontAnimate().into(imgLiveIcon);
+                        com.bumptech.glide.Glide.with(LivePlayActivity.this)
+                                .load(file)
+                                .signature(new com.bumptech.glide.signature.ObjectKey(file.lastModified()))
+                                .dontAnimate()
+                                .into(imgLiveIcon);
                     }
                 });
                 return;
@@ -1456,13 +1461,21 @@ public class LivePlayActivity extends BaseActivity {
             com.github.tvbox.osc.util.logo.LogoManager lm = com.github.tvbox.osc.util.logo.LogoManager.getInstance(this);
             File local = lm.getLocalLogo(channel_Name.getChannelName());
             if (local != null && local.exists()) {
-                com.bumptech.glide.Glide.with(this).load(local).dontAnimate().into(imgLiveIcon);
+                com.bumptech.glide.Glide.with(this)
+                        .load(local)
+                        .signature(new com.bumptech.glide.signature.ObjectKey(local.lastModified()))
+                        .dontAnimate()
+                        .into(imgLiveIcon);
             } else {
                 imgLiveIcon.setImageDrawable(null);
                 lm.downloadLogo(channel_Name.getChannelName(), finalLogoUrl, new com.github.tvbox.osc.util.logo.LogoManager.LogoCallback() {
                     @Override public void onSuccess(File file) {
                         if (file != null && file.exists() && imgLiveIcon != null) {
-                            com.bumptech.glide.Glide.with(LivePlayActivity.this).load(file).dontAnimate().into(imgLiveIcon);
+                            com.bumptech.glide.Glide.with(LivePlayActivity.this)
+                                    .load(file)
+                                    .signature(new com.bumptech.glide.signature.ObjectKey(file.lastModified()))
+                                    .dontAnimate()
+                                    .into(imgLiveIcon);
                         }
                     }
                     @Override public void onError(String msg) {
@@ -2561,20 +2574,28 @@ public class LivePlayActivity extends BaseActivity {
         ku9GuideDateAdapter = new Ku9GuideDateAdapter();
         ku9GuideDateList.setAdapter(ku9GuideDateAdapter);
         ku9GuideDateList.setOnItemListener(new TvRecyclerView.OnItemListener() {
-            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { ku9GuideDateAdapter.setFocusedIndex(-1); }
+            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
+                ku9GuideDateAdapter.setFocusedIndex(-1);
+            }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 ku9GuideDateAdapter.setFocusedIndex(position);
                 if (position >= 0 && position < ku9GuideDateAdapter.getItemCount()) {
                     ku9GuideDateAdapter.setSelectedIndex(position);
-                }
-                if (ku9GuideShowing && position >= 0 && position < ku9GuideDateAdapter.getItemCount()) {
-                    LiveEpgDate d = ku9GuideDateAdapter.getItem(position);
-                    if (d != null) loadKu9GuidePrograms(
-                            Math.max(0, ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex),
-                            d.getDateParamVal());
+                    // 焦点一移动就立即加载，让节目单不会停留在“今天”
+                    if (ku9GuideShowing) {
+                        LiveEpgDate d = ku9GuideDateAdapter.getItem(position);
+                        if (d != null) {
+                            int cp = Math.max(0, Math.min(
+                                    ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
+                                    Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
+                            loadKu9GuidePrograms(cp, d.getDateParamVal());
+                        }
+                    }
                 }
             }
-            @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { selectKu9GuideDate(position); }
+            @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) {
+                selectKu9GuideDate(position);
+            }
         });
 
         ku9GuideProgramList.setHasFixedSize(true);
@@ -2735,6 +2756,7 @@ public class LivePlayActivity extends BaseActivity {
         LiveChannelItem item = ku9GuideChannelAdapter.getItem(channelPosition);
         if (item == null) return;
         String channelName = item.getChannelName();
+        if (TextUtils.isEmpty(channelName)) return;
 
         List<Date> available = new ArrayList<>();
         try {
@@ -2743,7 +2765,10 @@ public class LivePlayActivity extends BaseActivity {
             } else {
                 available.addAll(EpgManager.getInstance(this).getAllAvailableDates());
             }
-        } catch (Exception ignored) { }
+        } catch (Exception e) {
+            FileLogger.write("LivePlay", "rebuildKu9GuideDatesForChannel error: " + e.getMessage());
+        }
+        FileLogger.write("LivePlay", "rebuildKu9GuideDatesForChannel: channel=[" + channelName + "] available=" + available.size());
 
         ku9GuideDateAdapter.setNewData(new ArrayList<LiveEpgDate>());
         SimpleDateFormat weekday = new SimpleDateFormat("EEE", Locale.CHINA);
@@ -2754,10 +2779,8 @@ public class LivePlayActivity extends BaseActivity {
         todayCal.set(Calendar.SECOND, 0); todayCal.set(Calendar.MILLISECOND, 0);
         String todayKey = md.format(todayCal.getTime());
 
-        // 【关键修改】无论是 XMLTV 还是模板 EPG，只要 available 为空，
-        // 就用“今天 -2 ~ 今天 +7”的固定日期填充，保证日期栏永远不为空。
-        // XMLTV 后续解析完成会再调用此方法覆盖为真实日期。
         if (available.isEmpty()) {
+            // EPG 尚未解析完成时先用固定范围占位；解析完成后 ensureKu9GuideEpgLoaded 会再次重建
             for (int i = -2; i <= 7; i++) {
                 Calendar d = (Calendar) todayCal.clone();
                 d.add(Calendar.DAY_OF_MONTH, i);
@@ -2767,6 +2790,9 @@ public class LivePlayActivity extends BaseActivity {
             int idx = 0;
             for (Date d : available) addKu9GuideDateItem(d, idx++, weekday, md, todayKey);
         }
+
+        ku9GuideDateAdapter.notifyDataSetChanged();
+        FileLogger.write("LivePlay", "rebuildKu9GuideDatesForChannel: 实际填充 " + ku9GuideDateAdapter.getItemCount() + " 天");
     }
 
     private void addKu9GuideDateItem(Date date, int index, SimpleDateFormat weekday, SimpleDateFormat md, String todayKey) {
@@ -2824,64 +2850,52 @@ public class LivePlayActivity extends BaseActivity {
         LiveChannelItem item = ku9GuideChannelAdapter.getItem(channelPosition);
         if (item == null) return;
         String channel = item.getChannelName();
+        if (TextUtils.isEmpty(channel)) return;
         String dateStr = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(date);
+        FileLogger.write("LivePlay", "loadKu9GuidePrograms: channel=[" + channel + "] date=[" + dateStr + "] pos=" + channelPosition);
 
         ArrayList<Epginfo> list = new ArrayList<>();
         try {
             List<EpgManager.EpgProgram> downloaded = EpgManager.getInstance(this).getProgramsForChannelOnDate(channel, date);
             if (downloaded != null) {
-                int index = 0;
                 for (EpgManager.EpgProgram p : downloaded) {
                     if (p == null || p.start == null || p.stop == null || !p.stop.after(p.start)) continue;
-                    Epginfo info = createXmlEpgInfoFromProgram(p, index++);
+                    Epginfo info = createXmlEpgInfoFromProgram(p, list.size());
                     info.desc = p.description == null ? "" : p.description;
                     list.add(info);
                 }
             }
-        } catch (Exception ignored) { }
-
-        if (!isXmlEpgAddress(epgStringAddress) && list.isEmpty()) {
-            try {
-                list = EpgUtil.loadEpgData(channel, dateStr, date);
-            } catch (Exception ignored) { }
+        } catch (Exception e) {
+            FileLogger.write("LivePlay", "loadKu9GuidePrograms error: " + e.getMessage());
         }
 
+        if (!isXmlEpgAddress(epgStringAddress) && list.isEmpty()) {
+            try { list = EpgUtil.loadEpgData(channel, dateStr, date); } catch (Exception ignored) { }
+        }
         if (!isXmlEpgAddress(epgStringAddress) && list.isEmpty()) {
             String key = channel + "_" + new SimpleDateFormat("EEE\nMM-dd", Locale.CHINA).format(date);
             ArrayList<Epginfo> cached = hsEpg.get(key);
             if (cached != null) list = new ArrayList<>(cached);
         }
 
-        if (isXmlEpgAddress(epgStringAddress)) {
-            FileLogger.write("LivePlay", "节目单日期加载: channel=[" + channel + "] date=[" + dateStr + "] count=" + list.size());
-            if (!list.isEmpty()) {
-                int withDesc = 0;
-                for (Epginfo e : list) if (e != null && !TextUtils.isEmpty(e.desc)) withDesc++;
-                FileLogger.write("LivePlay", "节目单desc完整性: channel=[" + channel + "] date=[" + dateStr + "] withDesc=" + withDesc);
-            }
-        }
-        if (list != null && !list.isEmpty()) {
-            if (!isXmlEpgAddress(epgStringAddress)) enrichEpgDescriptions(channel, list);
-            java.util.Collections.sort(list, (a, b) -> {
-                if (a == null || a.startdateTime == null) return 1;
-                if (b == null || b.startdateTime == null) return -1;
-                return a.startdateTime.compareTo(b.startdateTime);
-            });
-            for (int i = 0; i < list.size(); i++) if (list.get(i) != null) list.get(i).index = i;
-            ku9GuideProgramAdapter.setCanBack(item.getinclude_back());
-            ku9GuideProgramAdapter.setNewData(list);
-            int current = findCurrentEpgIndex(list);
-            ku9GuideProgramAdapter.setSelectedIndex(current);
-        } else {
+        if (list.isEmpty()) {
             ku9GuideProgramAdapter.setNewData(new ArrayList<>());
             ku9GuideProgramAdapter.setSelectedIndex(-1);
+            FileLogger.write("LivePlay", "loadKu9GuidePrograms EMPTY: channel=[" + channel + "] date=[" + dateStr + "]");
+            return;
         }
-        ku9GuideProgramList.post(() -> {
-            if (ku9GuideProgramAdapter.getItemCount() > 0) {
-                int idx = findCurrentEpgIndex(ku9GuideProgramAdapter.getData());
-                if (idx >= 0) ku9GuideProgramList.setSelection(idx);
-            }
+
+        Collections.sort(list, (a, b) -> {
+            if (a == null || a.startdateTime == null) return 1;
+            if (b == null || b.startdateTime == null) return -1;
+            return a.startdateTime.compareTo(b.startdateTime);
         });
+        for (int i = 0; i < list.size(); i++) if (list.get(i) != null) list.get(i).index = i;
+        ku9GuideProgramAdapter.setCanBack(item.getinclude_back());
+        ku9GuideProgramAdapter.setNewData(list);
+        int current = findCurrentEpgIndex(list);
+        ku9GuideProgramAdapter.setSelectedIndex(current);
+        FileLogger.write("LivePlay", "loadKu9GuidePrograms loaded: channel=[" + channel + "] date=[" + dateStr + "] count=" + list.size());
     }
 
     private void enrichEpgDescriptions(String channelName, ArrayList<Epginfo> list) {
