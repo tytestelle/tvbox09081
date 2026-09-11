@@ -2598,6 +2598,34 @@ public class LivePlayActivity extends BaseActivity {
             }
         });
 
+        // 强制：焦点在日期栏时，按 UP/DOWN 立即切换节目列表
+        ku9GuideDateList.setOnKeyListener((v, keyCode, event) -> {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    // 等 TV RecyclerView 完成选中位置更新
+                    ku9GuideDateList.postDelayed(() -> {
+                        if (!ku9GuideShowing || ku9GuideDateAdapter == null) return;
+                        int pos = ku9GuideDateList.getSelectedPosition();
+                        if (pos < 0 || pos >= ku9GuideDateAdapter.getItemCount()) {
+                            pos = ku9GuideDateAdapter.getSelectedIndex();
+                        }
+                        if (pos < 0 || pos >= ku9GuideDateAdapter.getItemCount()) return;
+
+                        ku9GuideDateAdapter.setSelectedIndex(pos);
+                        LiveEpgDate d = ku9GuideDateAdapter.getItem(pos);
+                        if (d == null) return;
+
+                        int cp = Math.max(0, Math.min(
+                                ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
+                                Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
+                        FileLogger.write("LivePlay", "日期栏UP/DOWN: pos=" + pos + " -> loadKu9GuidePrograms");
+                        loadKu9GuidePrograms(cp, d.getDateParamVal());
+                    }, 30);
+                }
+            }
+            return false;
+        });
+
         ku9GuideProgramList.setHasFixedSize(true);
         ku9GuideProgramList.setLayoutManager(new V7LinearLayoutManager(this.mContext, 1, false));
         ku9GuideProgramAdapter = new Ku9GuideProgramAdapter();
@@ -2610,7 +2638,12 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private void showKu9ProgramGuide() {
-        if (ku9ProgramGuide == null || liveChannelGroupList == null || liveChannelGroupList.isEmpty()) return;
+        FileLogger.write("LivePlay", "=== showKu9ProgramGuide 进入 ===");
+        if (ku9ProgramGuide == null || liveChannelGroupList == null || liveChannelGroupList.isEmpty()) {
+            FileLogger.write("LivePlay", "=== showKu9ProgramGuide 提前返回: programGuide=" + (ku9ProgramGuide != null)
+                    + " groupListSize=" + (liveChannelGroupList == null ? "null" : liveChannelGroupList.size()) + " ===");
+            return;
+        }
         hideBottomInfoBar();
         if (tvLeftChannelListLayout != null) tvLeftChannelListLayout.setVisibility(View.INVISIBLE);
         if (tvRightSettingLayout != null) tvRightSettingLayout.setVisibility(View.INVISIBLE);
@@ -2845,12 +2878,17 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private void loadKu9GuidePrograms(int channelPosition, Date date) {
-        if (ku9GuideChannelAdapter == null || ku9GuideProgramAdapter == null || date == null) return;
+        if (ku9GuideChannelAdapter == null || ku9GuideProgramAdapter == null || date == null) {
+            FileLogger.write("LivePlay", "loadKu9GuidePrograms 提前返回: channelAdapter=" + (ku9GuideChannelAdapter != null)
+                    + " programAdapter=" + (ku9GuideProgramAdapter != null) + " date=" + date);
+            return;
+        }
         if (channelPosition < 0 || channelPosition >= ku9GuideChannelAdapter.getData().size()) channelPosition = 0;
         LiveChannelItem item = ku9GuideChannelAdapter.getItem(channelPosition);
         if (item == null) return;
         String channel = item.getChannelName();
         if (TextUtils.isEmpty(channel)) return;
+
         String dateStr = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(date);
         FileLogger.write("LivePlay", "loadKu9GuidePrograms: channel=[" + channel + "] date=[" + dateStr + "] pos=" + channelPosition);
 
