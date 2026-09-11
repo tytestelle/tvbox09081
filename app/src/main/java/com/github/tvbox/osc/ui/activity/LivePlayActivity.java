@@ -402,7 +402,6 @@ public class LivePlayActivity extends BaseActivity {
     private JsonObject catchup = null;
     private String logoUrl = null;
 
-    // ★★★ 这个 epgdata 必须在类内部，之前是因为它在类外才导致编译失败
     private List<Epginfo> epgdata = new ArrayList<>();
 
     @Override
@@ -628,7 +627,6 @@ public class LivePlayActivity extends BaseActivity {
         }
 
         llBottomInfoBar.setOrientation(LinearLayout.HORIZONTAL);
-        // ★ 圆角半透明黑底
         android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
         bg.setColor(0xCC000000);
         bg.setCornerRadius(dp(14));
@@ -637,15 +635,14 @@ public class LivePlayActivity extends BaseActivity {
         llBottomInfoBar.setGravity(Gravity.CENTER_VERTICAL);
         llBottomInfoBar.setVisibility(View.GONE);
 
-        // ★ 位置和尺寸：底部左右对称，宽度为屏幕 90%，左右各留 5% 边距，圆角
         llBottomInfoBar.post(() -> {
             int screenW = getResources().getDisplayMetrics().widthPixels;
             int screenH = getResources().getDisplayMetrics().heightPixels;
             ViewGroup.LayoutParams lp = llBottomInfoBar.getLayoutParams();
             if (lp instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams flp = (FrameLayout.LayoutParams) lp;
-                float widthRatio = 0.90f; // 屏幕 90% 宽度
-                float marginRatio = 0.05f; // 左右各 5% 边距
+                float widthRatio = 0.90f;
+                float marginRatio = 0.05f;
                 flp.width = Math.round(screenW * widthRatio);
                 flp.height = FrameLayout.LayoutParams.WRAP_CONTENT;
                 flp.gravity = Gravity.BOTTOM | Gravity.START;
@@ -655,10 +652,8 @@ public class LivePlayActivity extends BaseActivity {
             }
         });
 
-        // ========== 1. 左侧大台标 ==========
         FrameLayout iconBox = new FrameLayout(this);
         iconBox.setLayoutParams(new LinearLayout.LayoutParams(dp(96), dp(96)));
-        // ★ 去掉台标框的底色，让台标透明融入
         iconBox.setBackgroundColor(Color.TRANSPARENT);
 
         imgLiveIconBottom = new ImageView(this);
@@ -684,7 +679,6 @@ public class LivePlayActivity extends BaseActivity {
 
         llBottomInfoBar.addView(iconBox);
 
-        // ========== 2. 右侧信息区 ==========
         LinearLayout infoBox = new LinearLayout(this);
         infoBox.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(
@@ -693,7 +687,6 @@ public class LivePlayActivity extends BaseActivity {
         infoBox.setLayoutParams(infoLp);
         llBottomInfoBar.addView(infoBox);
 
-        // ---- 行1：频道号 + 频道名 + 标签 ----
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
         row1.setGravity(Gravity.CENTER_VERTICAL);
@@ -724,7 +717,6 @@ public class LivePlayActivity extends BaseActivity {
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         row1.addView(llChannelTags);
 
-        // ---- 行2：进度条 + 距结束（进度条撑满）----
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
         row2.setGravity(Gravity.CENTER_VERTICAL);
@@ -751,7 +743,6 @@ public class LivePlayActivity extends BaseActivity {
         tvEpgRemaining.setSingleLine(true);
         row2.addView(tvEpgRemaining);
 
-        // ---- 行3：正在播放 ----
         LinearLayout row3 = new LinearLayout(this);
         row3.setOrientation(LinearLayout.HORIZONTAL);
         row3.setGravity(Gravity.CENTER_VERTICAL);
@@ -776,7 +767,6 @@ public class LivePlayActivity extends BaseActivity {
         tvCurrentProgramName.setEllipsize(android.text.TextUtils.TruncateAt.END);
         row3.addView(tvCurrentProgramName);
 
-        // ---- 行4：描述（最多 3 行） ----
         tvDesc = new TextView(this);
         tvDesc.setTextColor(0x99FFFFFF);
         tvDesc.setTextSize(12);
@@ -789,7 +779,6 @@ public class LivePlayActivity extends BaseActivity {
         tvDesc.setLayoutParams(descLp);
         infoBox.addView(tvDesc);
 
-        // ---- 行5：下一节目 ----
         LinearLayout row5 = new LinearLayout(this);
         row5.setOrientation(LinearLayout.HORIZONTAL);
         row5.setGravity(Gravity.CENTER_VERTICAL);
@@ -3899,86 +3888,129 @@ public class LivePlayActivity extends BaseActivity {
         mHandler.postDelayed(mHideSettingLayoutRun, postTimeout);
     }
 
+    // ★ 修改点：纯 Java 重写列表订阅 UI（图二效果），并添加置顶功能
     private void showSourceManageDialog() {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setTitle("列表订阅");
         builder.setCancelable(true);
+
+        // ===== 主布局：水平排列（左二维码，右列表） =====
         LinearLayout mainLayout = new LinearLayout(this);
         mainLayout.setOrientation(LinearLayout.HORIZONTAL);
-        mainLayout.setPadding(40, 30, 40, 30);
-        mainLayout.setBackgroundColor(0xDD000000);
+        mainLayout.setPadding(dp(20), dp(20), dp(20), dp(20));
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xEE1E1E1E);
+        bg.setCornerRadius(dp(10));
+        mainLayout.setBackground(bg);
         mainLayout.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // ===== 左侧：二维码和提示 =====
         LinearLayout leftPanel = new LinearLayout(this);
         leftPanel.setOrientation(LinearLayout.VERTICAL);
         leftPanel.setGravity(Gravity.CENTER);
-        leftPanel.setPadding(20, 20, 20, 20);
-        leftPanel.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        leftPanel.setPadding(dp(10), dp(10), dp(10), dp(10));
+        leftPanel.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
+
         ImageView qrImage = new ImageView(this);
-        qrImage.setLayoutParams(new ViewGroup.LayoutParams(180, 180));
+        int qrSize = dp(140);
+        LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(qrSize, qrSize);
+        qrImage.setLayoutParams(qrLp);
+        qrImage.setBackgroundColor(Color.WHITE);
         leftPanel.addView(qrImage);
+
         TextView deviceInfo = new TextView(this);
         String ip = getDeviceIp();
         String port = "9978";
         String content = "http://" + ip + ":" + port + "/";
-        deviceInfo.setText("扫码输入（点击二维码查看说明）\n" + content);
-        deviceInfo.setTextColor(0xFFFFFFFF);
-        deviceInfo.setTextSize(14);
+        deviceInfo.setText("扫码输入(点击二维码查看说明)\n" + content);
+        deviceInfo.setTextColor(0xFFAAAAAA);
+        deviceInfo.setTextSize(12);
         deviceInfo.setGravity(Gravity.CENTER);
-        deviceInfo.setPadding(0, 16, 0, 0);
+        deviceInfo.setPadding(0, dp(10), 0, 0);
         leftPanel.addView(deviceInfo);
-        Bitmap qrBitmap = QRCodeUtil.createQRCode(content, 180);
+
+        Bitmap qrBitmap = QRCodeUtil.createQRCode(content, qrSize);
         if (qrBitmap != null) qrImage.setImageBitmap(qrBitmap);
+
+        // ===== 右侧：列表和输入区域 =====
         LinearLayout rightPanel = new LinearLayout(this);
         rightPanel.setOrientation(LinearLayout.VERTICAL);
-        rightPanel.setPadding(20, 0, 0, 0);
+        rightPanel.setPadding(dp(15), 0, 0, 0);
         rightPanel.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2));
+
         ListView listView = new ListView(this);
-        listView.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 350));
-        listView.setDividerHeight(2);
-        listView.setDivider(new ColorDrawable(0x44FFFFFF));
+        LinearLayout.LayoutParams listLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1);
+        listView.setLayoutParams(listLp);
+        listView.setDividerHeight(dp(4));
+        listView.setDivider(new ColorDrawable(0x00000000));
+        listView.setPadding(0, 0, 0, dp(10));
         rightPanel.addView(listView);
+
+        LinearLayout inputArea = new LinearLayout(this);
+        inputArea.setOrientation(LinearLayout.VERTICAL);
+        rightPanel.addView(inputArea);
+
         LinearLayout inputRow = new LinearLayout(this);
         inputRow.setOrientation(LinearLayout.HORIZONTAL);
-        inputRow.setPadding(0, 16, 0, 0);
+        inputRow.setGravity(Gravity.CENTER_VERTICAL);
+        inputArea.addView(inputRow);
+
         EditText nameInput = new EditText(this);
         nameInput.setHint("名称(选填)");
         nameInput.setTextColor(0xFFFFFFFF);
         nameInput.setHintTextColor(0xFF888888);
         nameInput.setBackgroundColor(0x33FFFFFF);
-        nameInput.setPadding(12, 12, 12, 12);
+        nameInput.setPadding(dp(10), dp(10), dp(10), dp(10));
         LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-        nameLp.setMargins(0, 0, 8, 0);
+        nameLp.setMargins(0, 0, dp(8), 0);
         nameInput.setLayoutParams(nameLp);
         inputRow.addView(nameInput);
+
         EditText urlInput = new EditText(this);
-        urlInput.setHint("地址（点击左侧提示按钮配置headers）");
+        urlInput.setHint("地址(点击左侧提示按钮配置headers)");
         urlInput.setTextColor(0xFFFFFFFF);
         urlInput.setHintTextColor(0xFF888888);
         urlInput.setBackgroundColor(0x33FFFFFF);
-        urlInput.setPadding(12, 12, 12, 12);
+        urlInput.setPadding(dp(10), dp(10), dp(10), dp(10));
         LinearLayout.LayoutParams urlLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2);
-        urlLp.setMargins(0, 0, 8, 0);
+        urlLp.setMargins(0, 0, dp(8), 0);
         urlInput.setLayoutParams(urlLp);
         inputRow.addView(urlInput);
-        Button btnAdd = new Button(this);
-        btnAdd.setText("确定");
-        btnAdd.setBackgroundColor(0xFF03DAC5);
-        btnAdd.setTextColor(0xFF000000);
-        btnAdd.setPadding(20, 12, 20, 12);
-        inputRow.addView(btnAdd);
-        rightPanel.addView(inputRow);
-        Button btnClose = new Button(this);
-        btnClose.setText("关闭");
-        btnClose.setBackgroundColor(0x66FFFFFF);
-        btnClose.setTextColor(0xFFFFFFFF);
-        btnClose.setPadding(0, 12, 0, 12);
-        rightPanel.addView(btnClose);
+
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setGravity(Gravity.END);
+        btnRow.setPadding(0, dp(10), 0, 0);
+        inputArea.addView(btnRow);
+
+        TextView btnClear = new TextView(this);
+        btnClear.setText("❌ 清除");
+        btnClear.setTextColor(0xFFFF5555);
+        btnClear.setTextSize(14);
+        btnClear.setPadding(dp(15), dp(8), dp(15), dp(8));
+        btnClear.setBackgroundColor(0x33FFFFFF);
+        LinearLayout.LayoutParams clearLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clearLp.setMargins(0, 0, dp(10), 0);
+        btnClear.setLayoutParams(clearLp);
+        btnRow.addView(btnClear);
+
+        TextView btnConfirm = new TextView(this);
+        btnConfirm.setText("确定");
+        btnConfirm.setTextColor(0xFF000000);
+        btnConfirm.setTextSize(14);
+        btnConfirm.setPadding(dp(20), dp(8), dp(20), dp(8));
+        btnConfirm.setBackgroundColor(0xFF03DAC5);
+        btnRow.addView(btnConfirm);
+
         mainLayout.addView(leftPanel);
         mainLayout.addView(rightPanel);
         builder.setView(mainLayout);
         AlertDialog dialog = builder.create();
-        dialog.getWindow().setBackgroundDrawable(new ColorDrawable(android.graphics.Color.TRANSPARENT));
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        }
+
         SharedPreferences prefs = App.getInstance().getSharedPreferences("live_source_pref", Context.MODE_PRIVATE);
         String json = prefs.getString("source_list", "[]");
         JsonArray sourceArray = JsonParser.parseString(json).getAsJsonArray();
@@ -3989,9 +4021,16 @@ public class LivePlayActivity extends BaseActivity {
             String url = obj.has("url") ? obj.get("url").getAsString() : "";
             dataList.add(new SourceItem(name, url));
         }
+
         SourceAdapter adapter = new SourceAdapter(this, dataList, dialog);
         listView.setAdapter(adapter);
-        btnAdd.setOnClickListener(v -> {
+
+        btnClear.setOnClickListener(v -> {
+            nameInput.setText("");
+            urlInput.setText("");
+        });
+
+        btnConfirm.setOnClickListener(v -> {
             String name = nameInput.getText().toString().trim();
             String url = urlInput.getText().toString().trim();
             if (TextUtils.isEmpty(url)) {
@@ -4013,7 +4052,7 @@ public class LivePlayActivity extends BaseActivity {
             Toast.makeText(this, "添加成功", Toast.LENGTH_SHORT).show();
             refreshSourceList();
         });
-        btnClose.setOnClickListener(v -> dialog.dismiss());
+
         dialog.show();
     }
 
@@ -4022,82 +4061,130 @@ public class LivePlayActivity extends BaseActivity {
         SourceItem(String n, String u) { name = n; url = u; }
     }
 
+    // ★ 修改点：重写 Adapter，增加置顶、删除、复制图标按钮
     class SourceAdapter extends BaseAdapter {
         private Context context;
         private List<SourceItem> data;
         private AlertDialog dialog;
+
         public SourceAdapter(Context context, List<SourceItem> data, AlertDialog dialog) {
             this.context = context;
             this.data = data;
             this.dialog = dialog;
         }
+
         @Override public int getCount() { return data.size(); }
         @Override public Object getItem(int position) { return data.get(position); }
         @Override public long getItemId(int position) { return position; }
-        @Override public View getView(int position, View convertView, ViewGroup parent) {
+
+        @Override
+        public View getView(int position, View convertView, ViewGroup parent) {
             LinearLayout itemLayout;
             if (convertView == null) {
                 itemLayout = new LinearLayout(context);
                 itemLayout.setOrientation(LinearLayout.HORIZONTAL);
-                itemLayout.setPadding(12, 12, 12, 12);
-                itemLayout.setBackgroundColor(0x33FFFFFF);
+                itemLayout.setGravity(Gravity.CENTER_VERTICAL);
+                itemLayout.setPadding(dp(15), dp(12), dp(10), dp(12));
+                android.graphics.drawable.GradientDrawable itemBg = new android.graphics.drawable.GradientDrawable();
+                itemBg.setColor(0x33FFFFFF);
+                itemBg.setCornerRadius(dp(6));
+                itemLayout.setBackground(itemBg);
+
                 TextView tvName = new TextView(context);
                 tvName.setTextColor(0xFFFFFFFF);
                 tvName.setTextSize(15);
+                tvName.setGravity(Gravity.CENTER);
                 tvName.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                 itemLayout.addView(tvName);
-                TextView tvUrl = new TextView(context);
-                tvUrl.setTextColor(0xFFAAAAAA);
-                tvUrl.setTextSize(12);
-                tvUrl.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2));
-                itemLayout.addView(tvUrl);
-                TextView btnCopy = new TextView(context);
-                btnCopy.setText("复制");
-                btnCopy.setTextColor(0xFFFFFFFF);
-                btnCopy.setBackgroundColor(0x33666666);
-                btnCopy.setPadding(8, 4, 8, 4);
-                btnCopy.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                ImageView btnCopy = new ImageView(context);
+                btnCopy.setImageResource(android.R.drawable.ic_menu_copy);
+                btnCopy.setColorFilter(0xFFFFFFFF);
+                btnCopy.setPadding(dp(6), dp(6), dp(6), dp(6));
+                LinearLayout.LayoutParams copyLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+                copyLp.setMargins(dp(6), 0, dp(6), 0);
+                btnCopy.setLayoutParams(copyLp);
                 itemLayout.addView(btnCopy);
-                TextView btnDelete = new TextView(context);
-                btnDelete.setText("删除");
-                btnDelete.setTextColor(0xFFFF0000);
-                btnDelete.setBackgroundColor(0x33666666);
-                btnDelete.setPadding(8, 4, 8, 4);
-                btnDelete.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                ImageView btnDelete = new ImageView(context);
+                btnDelete.setImageResource(android.R.drawable.ic_menu_delete);
+                btnDelete.setColorFilter(0xFFFF5555);
+                btnDelete.setPadding(dp(6), dp(6), dp(6), dp(6));
+                LinearLayout.LayoutParams delLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+                delLp.setMargins(dp(6), 0, dp(6), 0);
+                btnDelete.setLayoutParams(delLp);
                 itemLayout.addView(btnDelete);
+
+                ImageView btnTop = new ImageView(context);
+                btnTop.setImageResource(android.R.drawable.ic_menu_upload);
+                btnTop.setColorFilter(0xFFFFFFFF);
+                btnTop.setPadding(dp(6), dp(6), dp(6), dp(6));
+                LinearLayout.LayoutParams topLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+                topLp.setMargins(dp(6), 0, 0, 0);
+                btnTop.setLayoutParams(topLp);
+                itemLayout.addView(btnTop);
+
                 convertView = itemLayout;
+                convertView.setTag(new ViewHolder(tvName, btnCopy, btnDelete, btnTop));
             } else {
                 itemLayout = (LinearLayout) convertView;
             }
+
+            ViewHolder holder = (ViewHolder) convertView.getTag();
             SourceItem item = data.get(position);
-            TextView tvName = (TextView) itemLayout.getChildAt(0);
-            TextView tvUrl = (TextView) itemLayout.getChildAt(1);
-            TextView btnCopy = (TextView) itemLayout.getChildAt(2);
-            TextView btnDelete = (TextView) itemLayout.getChildAt(3);
-            tvName.setText(item.name);
-            tvUrl.setText(item.url);
+            holder.tvName.setText(item.name);
+
             int selectedIdx = Hawk.get(HawkConfig.LIVE_SOURCE_SELECTED, 0);
             if (position == selectedIdx) {
-                itemLayout.setBackgroundColor(0x33FFFFFF);
-                tvName.setTextColor(0xFF03DAC5);
+                holder.tvName.setTextColor(0xFF03DAC5);
             } else {
-                itemLayout.setBackgroundColor(0x00000000);
-                tvName.setTextColor(0xFFFFFFFF);
+                holder.tvName.setTextColor(0xFFFFFFFF);
             }
-            convertView.setOnClickListener(v -> { loadSourceByIndex(position); dialog.dismiss(); });
-            btnCopy.setOnClickListener(v -> {
+
+            convertView.setOnClickListener(v -> {
+                loadSourceByIndex(position);
+                dialog.dismiss();
+            });
+
+            holder.btnCopy.setOnClickListener(v -> {
                 ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
                 cm.setText(item.url);
                 Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show();
             });
-            btnDelete.setOnClickListener(v -> {
+
+            holder.btnDelete.setOnClickListener(v -> {
                 data.remove(position);
                 notifyDataSetChanged();
                 saveSourceList(data);
                 Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show();
                 refreshSourceList();
             });
+
+            holder.btnTop.setOnClickListener(v -> {
+                if (position == 0) {
+                    Toast.makeText(context, "已经在顶部了", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                SourceItem topItem = data.remove(position);
+                data.add(0, topItem);
+                notifyDataSetChanged();
+                saveSourceList(data);
+                Toast.makeText(context, "已置顶", Toast.LENGTH_SHORT).show();
+                refreshSourceList();
+            });
+
             return convertView;
+        }
+    }
+
+    static class ViewHolder {
+        TextView tvName;
+        ImageView btnCopy, btnDelete, btnTop;
+        ViewHolder(TextView tvName, ImageView btnCopy, ImageView btnDelete, ImageView btnTop) {
+            this.tvName = tvName;
+            this.btnCopy = btnCopy;
+            this.btnDelete = btnDelete;
+            this.btnTop = btnTop;
         }
     }
 
@@ -4359,7 +4446,8 @@ public class LivePlayActivity extends BaseActivity {
                     final ArrayList<LiveChannelGroup> loadedGroups = new ArrayList<>(list);
                     mHandler.post(() -> applyLiveChannelGroups(loadedGroups));
                 }
-                @Override public void onError(Response<String> response) {
+                @Override
+                public void onError(Response<String> response) {
                     mHandler.post(() -> setEmptyLiveChannelList());
                 }
             });
@@ -4490,19 +4578,15 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private int getDefaultSettingGroupIndex() {
-        if (hasCurrentLiveChannelSource()) return 0;
-        return liveSettingGroupList != null && liveSettingGroupList.size() > 6 ? 6 : 0;
+        // ★ 修改点：始终默认选中第一个菜单组，保证全功能菜单的默认行为一致
+        return 0;
     }
 
+    // ★ 修改点：始终返回全部菜单，不过滤任何功能
     private ArrayList<LiveSettingGroup> getVisibleLiveSettingGroupList() {
         ArrayList<LiveSettingGroup> visibleGroups = new ArrayList<>();
-        if (liveSettingGroupList == null) return visibleGroups;
-        boolean showChannelOptions = hasCurrentLiveChannelSource();
-        for (LiveSettingGroup group : liveSettingGroupList) {
-            if (group == null) continue;
-            int groupIndex = group.getGroupIndex();
-            if (!showChannelOptions && groupIndex >= 0 && groupIndex <= 2) continue;
-            visibleGroups.add(group);
+        if (liveSettingGroupList != null) {
+            visibleGroups.addAll(liveSettingGroupList);
         }
         return visibleGroups;
     }
