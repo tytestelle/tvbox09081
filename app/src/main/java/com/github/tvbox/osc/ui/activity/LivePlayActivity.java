@@ -220,6 +220,9 @@ public class LivePlayActivity extends BaseActivity {
     private TextView tvCurrentSourceName;
     private String currentSourceName = "";
 
+    // ★ 新增：超时换源关闭常量
+    private static final int LIVE_CONNECT_TIMEOUT_OFF = -1;
+
     private android.content.BroadcastReceiver liveRefreshReceiver = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, android.content.Intent intent) {
             String action = intent.getAction();
@@ -1663,8 +1666,6 @@ public class LivePlayActivity extends BaseActivity {
         mHandler.removeCallbacks(mKu9DateWatchRun);
     }
 
-    // ================= 从这里开始是第二部分 =================
-    // （在下方"第二部分"中继续粘贴）
     private void showChannelList() {
         hideBottomInfoBar();
         if (tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.VISIBLE) {
@@ -2014,6 +2015,11 @@ public class LivePlayActivity extends BaseActivity {
         if (TextUtils.isEmpty(sourceName)) { if (tvCurrentSourceName != null) tvCurrentSourceName.setVisibility(View.GONE); return; }
         currentSourceName = sourceName;
         if (tvCurrentSourceName != null) { tvCurrentSourceName.setText(sourceName); tvCurrentSourceName.setVisibility(View.VISIBLE); }
+    }
+
+    // ★ 新增：超时换源是否已关闭
+    private boolean isSwitchOnTimeoutDisabled() {
+        return Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1) == LIVE_CONNECT_TIMEOUT_OFF;
     }
 
     private void installLiveReconnectListener() {
@@ -2749,6 +2755,7 @@ public class LivePlayActivity extends BaseActivity {
         mEpgDateGridView.setVisibility(View.GONE);
     }
 
+    // ★ 修改：超时换源关闭时不再触发换源/换台
     private void initVideoView() {
         LiveController controller = new LiveController(this);
         controller.setListener(new LiveController.LiveControlListener() {
@@ -2775,11 +2782,17 @@ public class LivePlayActivity extends BaseActivity {
                     case VideoView.STATE_ERROR:
                     case VideoView.STATE_PLAYBACK_COMPLETED:
                         hideSwitchChannelSnapshot();
-                        mHandler.postDelayed(mConnectTimeoutChangeSourceRun, 3500);
+                        // ★ 关闭超时换源时，不触发换源，由 mLiveReconnectRun 无限重连同源
+                        if (!isSwitchOnTimeoutDisabled()) {
+                            mHandler.postDelayed(mConnectTimeoutChangeSourceRun, 3500);
+                        }
                         break;
                     case VideoView.STATE_PREPARING:
                     case VideoView.STATE_BUFFERING:
-                        mHandler.postDelayed(mConnectTimeoutChangeSourceRun, (Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1) + 1) * 5000L);
+                        // ★ 关闭超时换源时，不触发换源，由 mLiveReconnectRun 无限重连同源
+                        if (!isSwitchOnTimeoutDisabled()) {
+                            mHandler.postDelayed(mConnectTimeoutChangeSourceRun, (Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1) + 1) * 5000L);
+                        }
                         break;
                     default:
                         break;
@@ -2810,8 +2823,10 @@ public class LivePlayActivity extends BaseActivity {
         return true;
     }
 
+    // ★ 修改：加守卫，关闭超时换源后绝不触发换源/换台
     private Runnable mConnectTimeoutChangeSourceRun = new Runnable() {
         @Override public void run() {
+            if (isSwitchOnTimeoutDisabled()) return;
             if (switchLivePlayerAndReplay()) return;
             currentLiveChangeSourceTimes++;
             if (currentLiveChannelItem != null && currentLiveChannelItem.getSourceNum() == currentLiveChangeSourceTimes) {
@@ -3009,6 +3024,7 @@ public class LivePlayActivity extends BaseActivity {
         liveSettingItemAdapter.setOnItemClickListener((adapter, view, position) -> { FastClickCheckUtil.check(view); clickSettingItem(position); });
     }
 
+    // ★ 修改：case 3 支持「关闭」选项
     private void clickSettingItem(int position) {
         int realGroupIndex = liveSettingGroupAdapter != null ? liveSettingGroupAdapter.getSelectedGroupIndex() : -1;
         if (realGroupIndex >= 0 && realGroupIndex < 3 && !isCurrentLiveChannelValid()) return;
@@ -3031,7 +3047,17 @@ public class LivePlayActivity extends BaseActivity {
                 if (currentLiveChannelItem != null && mVideoView != null) { mVideoView.setUrl(currentLiveChannelItem.getUrl(), liveChannelHeader()); mVideoView.start(); }
                 break;
             case 3:
-                Hawk.put(HawkConfig.LIVE_CONNECT_TIMEOUT, position);
+                if (liveSettingItemAdapter != null && position >= 0
+                        && position < liveSettingItemAdapter.getData().size()) {
+                    LiveSettingItem clickedItem = liveSettingItemAdapter.getData().get(position);
+                    if (clickedItem != null && "关闭".equals(clickedItem.getItemName())) {
+                        // ★ 关闭超时换源，取消已挂起的换源任务，交给断线重连同源恢复
+                        Hawk.put(HawkConfig.LIVE_CONNECT_TIMEOUT, LIVE_CONNECT_TIMEOUT_OFF);
+                        mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
+                    } else {
+                        Hawk.put(HawkConfig.LIVE_CONNECT_TIMEOUT, position);
+                    }
+                }
                 break;
             case 4:
                 boolean select = false;
@@ -3747,7 +3773,7 @@ public class LivePlayActivity extends BaseActivity {
         return visibleGroups;
     }
 
-    // ★ 修复：每次新建列表，避免污染 ApiConfig 缓存，同时保证菜单项始终完整
+    // ★ 修改：超时换源组追加「关闭」选项
     private void initLiveSettingGroupList() {
         List<LiveSettingGroup> base = ApiConfig.get().getLiveSettingGroupList();
         liveSettingGroupList = new ArrayList<>();
@@ -3760,9 +3786,32 @@ public class LivePlayActivity extends BaseActivity {
 
         LiveSettingGroup timeoutGroup = findSettingGroupByIndex(3);
         if (timeoutGroup != null && timeoutGroup.getLiveSettingItems() != null) {
+            // ★ 追加「关闭」选项（幂等，避免重复添加）
+            boolean hasOffOption = false;
+            for (LiveSettingItem item : timeoutGroup.getLiveSettingItems()) {
+                if (item != null && "关闭".equals(item.getItemName())) { hasOffOption = true; break; }
+            }
+            if (!hasOffOption) {
+                LiveSettingItem offItem = new LiveSettingItem();
+                offItem.setItemIndex(timeoutGroup.getLiveSettingItems().size());
+                offItem.setItemName("关闭");
+                timeoutGroup.getLiveSettingItems().add(offItem);
+            }
+
+            // ★ 回显选中状态（-1 代表关闭）
+            for (LiveSettingItem item : timeoutGroup.getLiveSettingItems()) {
+                if (item != null) item.setItemSelected(false);
+            }
             int timeoutIdx = Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1);
-            if (timeoutIdx >= 0 && timeoutIdx < timeoutGroup.getLiveSettingItems().size()) timeoutGroup.getLiveSettingItems().get(timeoutIdx).setItemSelected(true);
+            if (timeoutIdx == LIVE_CONNECT_TIMEOUT_OFF) {
+                for (LiveSettingItem item : timeoutGroup.getLiveSettingItems()) {
+                    if (item != null && "关闭".equals(item.getItemName())) { item.setItemSelected(true); break; }
+                }
+            } else if (timeoutIdx >= 0 && timeoutIdx < timeoutGroup.getLiveSettingItems().size()) {
+                timeoutGroup.getLiveSettingItems().get(timeoutIdx).setItemSelected(true);
+            }
         }
+
         LiveSettingGroup displayGroup = findSettingGroupByIndex(4);
         if (displayGroup != null && displayGroup.getLiveSettingItems() != null && displayGroup.getLiveSettingItems().size() > 3) {
             displayGroup.getLiveSettingItems().get(0).setItemSelected(Hawk.get(HawkConfig.LIVE_SHOW_TIME, false));
