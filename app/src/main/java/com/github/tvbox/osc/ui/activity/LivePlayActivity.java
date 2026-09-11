@@ -1,5 +1,7 @@
 package com.github.tvbox.osc.ui.activity;
 
+// ===== 版本：ku9 节目单「焦点轮询」+ 台标 BitmapFactory 直读 =====
+
 import static xyz.doikki.videoplayer.util.PlayerUtils.safeTimeMs;
 
 import android.Manifest;
@@ -192,7 +194,7 @@ public class LivePlayActivity extends BaseActivity {
     private boolean ku9GuideShowing = false;
     private boolean ku9GuideEpgLoadRequested = false;
 
-    // 酷9日期栏轮询（绕过 TvRecyclerView 焦点机制）
+    // ===== 酷9日期栏轮询（绕过 TvRecyclerView 焦点机制） =====
     private int lastLoadedKu9DateFocusedPos = -1;
     private int lastLoadedKu9DateSelectedPos = -1;
     private final Runnable mKu9DateWatchRun = new Runnable() {
@@ -1441,6 +1443,10 @@ public class LivePlayActivity extends BaseActivity {
         }
     }
 
+    /**
+     * XMLTV 模式下直接 BitmapFactory 读取处理后的透明 PNG，绕过 Glide 一切缓存；
+     * 同时显式清空 ImageView 自身及其父 View 的背景，避免透明 PNG 被父容器染白。
+     */
     private void updateCurrentChannelIcon() {
         if (channel_Name == null || channel_Name.getChannelName() == null) return;
         final String channelName = channel_Name.getChannelName();
@@ -2706,7 +2712,7 @@ public class LivePlayActivity extends BaseActivity {
             }
         });
 
-        // 强制：焦点在日期栏时，按 UP/DOWN 立即切换节目列表（保留作为兜底）
+        // 强制：焦点在日期栏时，按 UP/DOWN 立即切换节目列表（作为兜底）
         ku9GuideDateList.setOnKeyListener((v, keyCode, event) -> {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
