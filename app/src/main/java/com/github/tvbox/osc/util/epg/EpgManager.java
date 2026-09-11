@@ -15,7 +15,6 @@ import com.google.gson.JsonParser;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserFactory;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -24,7 +23,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -56,6 +54,12 @@ import okhttp3.Response;
  * The remote <epg-url>.hash is checked first. Only when the hash changes (or
  * the local XML is missing) is the XML downloaded again. Playback never waits
  * for EPG network I/O: refresh and icon downloads run in background threads.
+ *
+ * 台标加载策略（顺序回退）：
+ *   1) 本地 logos/{epgid}.png 存在 → 直接返回
+ *   2) EPG 文件里该 epgid 有 icon 地址 → 下载 / 透明化 / 保存为 {epgid}.png
+ *   3) EPG 没有或下载失败 → 到 GitHub 仓库下载 {epgid}.png → 透明化 / 保存
+ *   4) 全部失败 → 返回 null，调用方不显示台标
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -63,6 +67,10 @@ public class EpgManager {
     private static final String EPG_FILE_NAME = "epg.xml";
     private static final String HASH_FILE_NAME = "epg.hash";
     private static final String LOGO_DIR_NAME = "logos";
+
+    /** GitHub 台标仓库基础地址（与参考实现保持一致）。 */
+    private static final String GITHUB_LOGO_BASE_URL =
+            "https://raw.githubusercontent.com/tytestelle/logo/main/ico/logo/";
 
     private static EpgManager instance;
 
@@ -95,6 +103,8 @@ public class EpgManager {
     private final Map<String, List<EpgProgram>> programsByEpgId = new HashMap<>();
     private final Map<String, String> iconUrlByEpgId = new HashMap<>();
     private final Set<String> loadedEpgIds = new HashSet<>();
+
+    // 保留旧的偏好设置键，兼容调用方，但新的加载链路不再依赖它。
     private static final String LOGO_PREFS = "logo_settings";
     private static final String LOGO_SOURCE_KEY = "xmltv_logo_source";
     public static final String LOGO_SOURCE_EPG = "EPG";
@@ -554,16 +564,7 @@ public class EpgManager {
                     }
                 }
 
-                for (String channelName : channelNames) {
-                    if (TextUtils.isEmpty(channelName)) continue;
-                    String epgid = getEpgIdByChannelName(channelName);
-                    if (TextUtils.isEmpty(epgid)) continue;
-                    ChannelInfo info;
-                    synchronized (parseLock) { info = channelsByDisplayName.get(epgid); }
-                    if (info != null && !TextUtils.isEmpty(info.iconUrl)) {
-                        scheduleIconDownload(epgid, info.iconUrl);
-                    }
-                }
+                // 解析完成后不需要主动预下载台标：UI 会通过 loadProcessedChannelIcon 按需加载。
             } catch (Exception e) {
                 FileLogger.write(TAG, "当前频道组 EPG 懒加载失败", e);
             } finally {
@@ -593,8 +594,6 @@ public class EpgManager {
             }
             List<EpgProgram> all = programsByEpgId.get(epgid);
             if (all != null) result.addAll(all);
-            String icon = iconUrlByEpgId.get(epgid);
-            if (!TextUtils.isEmpty(icon)) scheduleIconDownload(epgid, icon);
             FileLogger.write(TAG, "EPG严格映射完成: name=[" + channelName + "] -> name匹配epgid=[" + epgid
                     + "] -> display-name=[" + epgid + "] -> channel ids=" + ids
                     + " -> 全部programme=" + result.size() + " -> 日期=" + buildProgramDateKeys(result));
@@ -610,15 +609,16 @@ public class EpgManager {
         return getChannelIconUrl(channelName);
     }
 
+    /**
+     * 只读地返回 EPG 中该频道对应的 icon 地址（不触发下载）。
+     */
     public String getChannelIconUrl(String channelName) {
-        if (!parsed) return "";
+        if (!parsed || TextUtils.isEmpty(channelName)) return "";
         String epgid = getEpgIdByChannelName(channelName);
         if (TextUtils.isEmpty(epgid)) return "";
         synchronized (parseLock) {
             String icon = iconUrlByEpgId.get(epgid);
-            if (TextUtils.isEmpty(icon)) return "";
-            scheduleIconDownload(epgid, icon);
-            return icon;
+            return TextUtils.isEmpty(icon) ? "" : icon;
         }
     }
 
@@ -626,41 +626,167 @@ public class EpgManager {
         return null;
     }
 
+    // ======================== 台标：本地 → EPG → GitHub ========================
+
+    /**
+     * 按顺序加载台标：
+     *   1) 本地 logos/{epgid}.png 存在 → 直接返回
+     *   2) EPG 中该 epgid 有 icon 地址 → 下载 / 透明化 / 保存
+     *   3) GitHub 仓库 {GITHUB_LOGO_BASE_URL}{epgid}.png → 下载 / 透明化 / 保存
+     *   4) 全部失败 → 回调 null，UI 不显示台标
+     *
+     * 回调一定会被调用一次，且始终在主线程。
+     */
     public void loadProcessedChannelIcon(final String channelName, final IconCallback callback) {
         if (TextUtils.isEmpty(channelName)) {
             if (callback != null) mainHandler.post(() -> callback.onIcon(null));
             return;
         }
         final String epgid = getEpgIdByChannelName(channelName);
-        if (TextUtils.isEmpty(epgid) || !parsed) {
+        if (TextUtils.isEmpty(epgid)) {
+            FileLogger.write(TAG, "台标加载失败：频道未在 epg_data.json 命中: name=[" + channelName + "]");
             if (callback != null) mainHandler.post(() -> callback.onIcon(null));
             return;
         }
         final File target = new File(logoDir, epgid + ".png");
-        final String selectedSource = getLogoSource(context);
-        final File sourceMark = new File(logoDir, epgid + ".source");
-        if (LOGO_SOURCE_GITHUB.equals(selectedSource)) {
-            String mark = readSmallText(sourceMark);
-            if (target.exists() && target.length() > 0 && LOGO_SOURCE_GITHUB.equals(mark)) {
-                mainHandler.post(() -> { if (callback != null) callback.onIcon(target); });
-                return;
+
+        // ① 本地已存在 → 直接返回，不再做任何处理
+        if (target.exists() && target.length() > 0) {
+            if (callback != null) mainHandler.post(() -> callback.onIcon(target));
+            return;
+        }
+
+        // 已有同 epgid 的下载在飞行中 → 轮询等待结果
+        if (!iconInFlight.add(epgid)) {
+            if (callback != null) {
+                final Runnable[] checker = new Runnable[1];
+                checker[0] = () -> {
+                    if (target.exists() && target.length() > 0) {
+                        callback.onIcon(target);
+                    } else if (iconInFlight.contains(epgid)) {
+                        mainHandler.postDelayed(checker[0], 120);
+                    } else {
+                        callback.onIcon(null);
+                    }
+                };
+                mainHandler.postDelayed(checker[0], 120);
             }
-            scheduleGithubIconDownload(epgid, target, sourceMark, callback);
             return;
         }
-        if (target.exists() && target.length() > 0 && LOGO_SOURCE_EPG.equals(readSmallText(sourceMark))) {
-            iconExecutor.execute(() -> {
-                try { makeExistingIconTransparent(target); } catch (Exception e) { FileLogger.write(TAG, "本地台标检查失败: " + epgid, e); }
-                mainHandler.post(() -> { if (callback != null) callback.onIcon(target.exists() ? target : null); });
-            });
-            return;
+
+        iconExecutor.execute(() -> {
+            File result = null;
+            try {
+                // ② 尝试 EPG 中的 icon 地址
+                String epgIconUrl;
+                synchronized (parseLock) {
+                    epgIconUrl = iconUrlByEpgId.get(epgid);
+                }
+                if (!TextUtils.isEmpty(epgIconUrl)) {
+                    FileLogger.write(TAG, "台标尝试来源=EPG: epgid=[" + epgid + "] url=[" + epgIconUrl + "]");
+                    result = downloadAndSaveProcessedIcon(epgid, epgIconUrl, target);
+                    if (result != null) {
+                        FileLogger.write(TAG, "台标来源命中=EPG: epgid=[" + epgid + "] -> " + target.getAbsolutePath());
+                    } else {
+                        FileLogger.write(TAG, "EPG 台标下载/处理失败，回退 GitHub: epgid=[" + epgid + "]");
+                    }
+                } else {
+                    FileLogger.write(TAG, "EPG 中无台标地址，直接尝试 GitHub: epgid=[" + epgid + "]");
+                }
+
+                // ③ 回退 GitHub
+                if (result == null) {
+                    String githubUrl = GITHUB_LOGO_BASE_URL + epgid + ".png";
+                    FileLogger.write(TAG, "台标尝试来源=GitHub: epgid=[" + epgid + "] url=[" + githubUrl + "]");
+                    result = downloadAndSaveProcessedIcon(epgid, githubUrl, target);
+                    if (result != null) {
+                        FileLogger.write(TAG, "台标来源命中=GitHub: epgid=[" + epgid + "] -> " + target.getAbsolutePath());
+                    }
+                }
+
+                if (result == null) {
+                    FileLogger.write(TAG, "台标最终未获取: epgid=[" + epgid + "] name=[" + channelName + "]");
+                }
+            } catch (Exception e) {
+                FileLogger.write(TAG, "台标加载异常: epgid=[" + epgid + "]", e);
+            } finally {
+                iconInFlight.remove(epgid);
+                final File finalResult = result;
+                if (callback != null) {
+                    mainHandler.post(() -> callback.onIcon(finalResult));
+                }
+            }
+        });
+    }
+
+    /**
+     * 从 url 下载图片 → 透明化 → 原子写入 target。返回成功保存的文件，失败返回 null。
+     */
+    private File downloadAndSaveProcessedIcon(String epgid, String url, File target) {
+        Bitmap bitmap = null;
+        Bitmap transparent = null;
+        File tmp = null;
+        try {
+            Request request = new Request.Builder().url(url).get().build();
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    FileLogger.write(TAG, "台标下载失败 HTTP " + response.code() + ": " + url);
+                    return null;
+                }
+                byte[] data = response.body().bytes();
+                bitmap = BitmapFactory.decodeByteArray(data, 0, data.length);
+                if (bitmap == null) {
+                    FileLogger.write(TAG, "台标解码失败: " + url);
+                    return null;
+                }
+                transparent = makeTransparent(bitmap);
+                if (transparent == null) {
+                    FileLogger.write(TAG, "台标透明化失败: " + url);
+                    return null;
+                }
+
+                if (!logoDir.exists() && !logoDir.mkdirs() && !logoDir.isDirectory()) {
+                    FileLogger.write(TAG, "无法创建台标目录: " + logoDir.getAbsolutePath());
+                    return null;
+                }
+                tmp = File.createTempFile("logo_", ".png", logoDir);
+                try (FileOutputStream out = new FileOutputStream(tmp, false)) {
+                    if (!transparent.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                        throw new java.io.IOException("PNG 写入失败");
+                    }
+                    out.flush();
+                    try { out.getFD().sync(); } catch (Exception ignored) { }
+                }
+                if (!tmp.exists() || tmp.length() <= 0) throw new java.io.IOException("临时 PNG 未生成");
+
+                File backup = new File(logoDir, target.getName() + ".bak");
+                if (backup.exists()) backup.delete();
+                boolean movedOld = target.exists() && target.renameTo(backup);
+                boolean installed = tmp.renameTo(target);
+                if (!installed) {
+                    copyFile(tmp, target);
+                    installed = target.exists() && target.length() > 0;
+                }
+                if (!installed) {
+                    if (movedOld && !target.exists()) backup.renameTo(target);
+                    throw new java.io.IOException("透明 PNG 替换失败");
+                }
+                if (backup.exists()) backup.delete();
+                if (tmp.exists()) tmp.delete();
+                return target.exists() && target.length() > 0 ? target : null;
+            }
+        } catch (Exception e) {
+            FileLogger.write(TAG, "台标下载/处理异常: epgid=[" + epgid + "] url=[" + url + "]", e);
+            if (tmp != null && tmp.exists()) tmp.delete();
+            return null;
+        } finally {
+            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+            if (transparent != null && !transparent.isRecycled()) transparent.recycle();
         }
-        String iconUrl = getChannelIconUrl(channelName);
-        if (TextUtils.isEmpty(iconUrl)) {
-            if (callback != null) mainHandler.post(() -> callback.onIcon(null));
-            return;
-        }
-        scheduleIconDownload(epgid, iconUrl, callback);
+    }
+
+    public interface IconCallback {
+        void onIcon(File file);
     }
 
     public void clearLogoSourceCache() {
@@ -669,16 +795,12 @@ public class EpgManager {
         if (files == null) return;
         for (File f : files) {
             if (f == null) continue;
-            String n = f.getName();
-            if (n.endsWith(".source") || n.endsWith(".png")) {
-                try { f.delete(); } catch (Exception ignored) { }
-            }
+            try { f.delete(); } catch (Exception ignored) { }
         }
+        FileLogger.write(TAG, "台标缓存已清空: " + logoDir.getAbsolutePath());
     }
 
-    public interface IconCallback {
-        void onIcon(File file);
-    }
+    // ======================== EPG 日期/节目查询 ========================
 
     public List<Date> getAvailableDatesForChannel(String channelName) {
         List<Date> result = new ArrayList<>();
@@ -797,211 +919,7 @@ public class EpgManager {
         return null;
     }
 
-    // ======================== 台标 ========================
-    private void scheduleGithubIconDownload(final String epgid, final File target, final File sourceMark, final IconCallback callback) {
-        if (TextUtils.isEmpty(epgid)) { if (callback != null) mainHandler.post(() -> callback.onIcon(null)); return; }
-        final String key = "GITHUB:" + epgid;
-        if (!iconInFlight.add(key)) {
-            if (callback != null) mainHandler.postDelayed(() -> {
-                if (target.exists() && target.length() > 0 && LOGO_SOURCE_GITHUB.equals(readSmallText(sourceMark))) callback.onIcon(target);
-                else callback.onIcon(null);
-            }, 180);
-            return;
-        }
-        iconExecutor.execute(() -> {
-            try {
-                String url = "https://raw.githubusercontent.com/tytestelle/logo/main/ico/logo/" + epgid + ".png";
-                Request request = new Request.Builder().url(url).build();
-                Response response = httpClient.newCall(request).execute();
-                if (!response.isSuccessful() || response.body() == null) throw new java.io.IOException("HTTP " + response.code());
-                byte[] bytes = response.body().bytes();
-                Bitmap b = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                if (b == null) throw new java.io.IOException("PNG解码失败");
-                File tmp = new File(target.getParentFile(), target.getName() + ".github_tmp");
-                try (FileOutputStream out = new FileOutputStream(tmp, false)) { b.compress(Bitmap.CompressFormat.PNG, 100, out); out.flush(); }
-                b.recycle();
-                if (!tmp.isFile() || tmp.length() == 0) throw new java.io.IOException("GitHub台标写入失败");
-                if (target.exists()) target.delete();
-                if (!tmp.renameTo(target)) { copyFile(tmp, target); tmp.delete(); }
-                writeSmallText(sourceMark, LOGO_SOURCE_GITHUB);
-            } catch (Exception e) {
-                FileLogger.write(TAG, "GitHub台标下载失败: " + epgid, e);
-            } finally {
-                iconInFlight.remove(key);
-                final File result = target.exists() && target.length() > 0 && LOGO_SOURCE_GITHUB.equals(readSmallText(sourceMark)) ? target : null;
-                if (callback != null) mainHandler.post(() -> callback.onIcon(result));
-            }
-        });
-    }
-
-    private void scheduleIconDownload(final String epgid, final String iconUrl) {
-        scheduleIconDownload(epgid, iconUrl, null);
-    }
-
-    private void scheduleIconDownload(final String epgid, final String iconUrl, final IconCallback callback) {
-        if (TextUtils.isEmpty(epgid) || TextUtils.isEmpty(iconUrl)) {
-            if (callback != null) mainHandler.post(() -> callback.onIcon(null));
-            return;
-        }
-        final File target = new File(logoDir, epgid + ".png");
-        if (!iconInFlight.add(epgid)) {
-            if (callback != null) {
-                final Runnable[] checker = new Runnable[1];
-                checker[0] = () -> {
-                    if (target.exists() && target.length() > 0) {
-                        callback.onIcon(target);
-                    } else if (iconInFlight.contains(epgid)) {
-                        mainHandler.postDelayed(checker[0], 120);
-                    } else {
-                        callback.onIcon(null);
-                    }
-                };
-                mainHandler.postDelayed(checker[0], 120);
-            }
-            return;
-        }
-        iconExecutor.execute(() -> {
-            try {
-                if (target.exists() && target.length() > 0) {
-                    makeExistingIconTransparent(target);
-                } else {
-                    downloadAndProcessIcon(epgid, iconUrl, target);
-                }
-            } catch (Exception e) {
-                FileLogger.write(TAG, "台标任务异常: " + epgid, e);
-            } finally {
-                iconInFlight.remove(epgid);
-                if (callback != null) {
-                    final File result = target.exists() && target.length() > 0 ? target : null;
-                    mainHandler.post(() -> callback.onIcon(result));
-                }
-            }
-        });
-    }
-
-    private void makeExistingIconTransparent(File target) {
-        if (target == null || !target.exists() || target.length() <= 0) return;
-        Bitmap bitmap = null;
-        Bitmap transparent = null;
-        File tmp = null;
-        try {
-            if (!logoDir.exists() && !logoDir.mkdirs() && !logoDir.isDirectory()) {
-                throw new java.io.IOException("无法创建台标目录: " + logoDir.getAbsolutePath());
-            }
-            bitmap = BitmapFactory.decodeFile(target.getAbsolutePath());
-            if (bitmap == null) throw new java.io.IOException("Bitmap 解码失败");
-            transparent = makeTransparent(bitmap);
-            if (transparent == null) throw new java.io.IOException("透明化结果为空");
-
-            tmp = new File(target.getParentFile(), target.getName() + ".tmp_" + System.nanoTime());
-            if (tmp.exists()) tmp.delete();
-            try (FileOutputStream out = new FileOutputStream(tmp, false)) {
-                if (!transparent.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                    throw new java.io.IOException("PNG 压缩写入失败");
-                }
-                out.flush();
-                try { out.getFD().sync(); } catch (Exception ignored) { }
-            }
-            if (!tmp.isFile() || tmp.length() <= 0) {
-                throw new java.io.IOException("临时 PNG 写入后不存在或为空: " + tmp.getAbsolutePath());
-            }
-            Bitmap verify = BitmapFactory.decodeFile(tmp.getAbsolutePath());
-            if (verify == null) throw new java.io.IOException("临时 PNG 解码校验失败");
-            verify.recycle();
-
-            File backup = new File(target.getParentFile(), target.getName() + ".bak");
-            if (backup.exists()) backup.delete();
-            if (!target.renameTo(backup)) {
-                if (!target.delete() && target.exists()) throw new java.io.IOException("无法替换旧台标");
-            }
-            boolean installed = tmp.renameTo(target);
-            if (!installed) {
-                copyFile(tmp, target);
-                installed = target.isFile() && target.length() > 0;
-            }
-            if (!installed) {
-                if (backup.isFile() && !target.exists()) backup.renameTo(target);
-                throw new java.io.IOException("透明 PNG 安装失败");
-            }
-            if (backup.exists()) backup.delete();
-            if (tmp.exists()) tmp.delete();
-            writeSmallText(new File(target.getParentFile(), target.getName().replace(".png", ".source")), LOGO_SOURCE_EPG);
-        } catch (Exception e) {
-            FileLogger.write(TAG, "本地台标透明化失败: " + (target == null ? "null" : target.getName()), e);
-            if (tmp != null && tmp.exists()) tmp.delete();
-        } finally {
-            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
-            if (transparent != null && !transparent.isRecycled()) transparent.recycle();
-        }
-    }
-
-    private void downloadAndProcessIcon(String epgid, String iconUrl, File target) {
-        Bitmap bitmap = null;
-        Bitmap transparent = null;
-        File tmp = null;
-        try {
-            Request request = new Request.Builder().url(iconUrl).get().build();
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful() || response.body() == null) return;
-                byte[] data = response.body().bytes();
-                bitmap = BitmapFactory.decodeByteArray(data, 0, data.length);
-                if (bitmap == null) return;
-                transparent = makeTransparent(bitmap);
-                if (transparent == null) return;
-
-                if (!logoDir.exists() && !logoDir.mkdirs() && !logoDir.isDirectory()) return;
-                tmp = File.createTempFile("logo_", ".png", logoDir);
-                try (FileOutputStream out = new FileOutputStream(tmp, false)) {
-                    if (!transparent.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                        throw new java.io.IOException("PNG 写入失败");
-                    }
-                    out.flush();
-                    try { out.getFD().sync(); } catch (Exception ignored) { }
-                }
-                if (!tmp.exists() || tmp.length() <= 0) throw new java.io.IOException("临时 PNG 未生成");
-
-                File backup = new File(logoDir, target.getName() + ".bak");
-                if (backup.exists()) backup.delete();
-                boolean movedOld = target.exists() && target.renameTo(backup);
-                boolean installed = tmp.renameTo(target);
-                if (!installed) {
-                    copyFile(tmp, target);
-                    installed = target.exists() && target.length() > 0;
-                }
-                if (!installed) {
-                    if (movedOld && !target.exists()) backup.renameTo(target);
-                    throw new java.io.IOException("透明 PNG 替换失败");
-                }
-                if (backup.exists()) backup.delete();
-                if (tmp.exists()) tmp.delete();
-                writeSmallText(new File(logoDir, epgid + ".source"), LOGO_SOURCE_EPG);
-                FileLogger.write(TAG, "EPG 台标已保存(透明 PNG): " + target.getAbsolutePath());
-            }
-        } catch (Exception e) {
-            FileLogger.write(TAG, "EPG 台标处理失败: " + epgid, e);
-            if (tmp != null && tmp.exists()) tmp.delete();
-        } finally {
-            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
-            if (transparent != null && !transparent.isRecycled()) transparent.recycle();
-        }
-    }
-
-    private String readSmallText(File file) {
-        if (file == null || !file.isFile()) return "";
-        try (InputStream in = new FileInputStream(file)) {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[64]; int n;
-            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-            return new String(out.toByteArray(), StandardCharsets.UTF_8).trim();
-        } catch (Exception ignored) { return ""; }
-    }
-
-    private void writeSmallText(File file, String value) {
-        try (FileOutputStream out = new FileOutputStream(file, false)) {
-            out.write((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
-            out.flush();
-        } catch (Exception e) { FileLogger.write(TAG, "台标来源标记写入失败: " + file, e); }
-    }
+    // ======================== 台标透明化 ========================
 
     /**
      * V7：关键修复 —— 从零创建 ARGB_8888 Bitmap 并显式 setHasAlpha(true)。
@@ -1011,8 +929,6 @@ public class EpgManager {
     private Bitmap makeTransparent(Bitmap src) {
         if (src == null) return null;
         final int width = src.getWidth(), height = src.getHeight();
-        // 关键：从零创建 ARGB_8888 bitmap，并显式声明 hasAlpha=true，
-        // 否则 JPG 解码出来的 bitmap（hasAlpha=false）会让 PNG 编码器丢弃 alpha 通道。
         Bitmap result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         result.setHasAlpha(true);
 
@@ -1044,9 +960,8 @@ public class EpgManager {
         }
 
         result.setPixels(pixels, 0, width, 0, 0, width, height);
-        result.setHasAlpha(true);  // 双保险
+        result.setHasAlpha(true);
 
-        // 打印四角 alpha 便于验证
         int tl = Color.alpha(pixels[0]);
         int tr = Color.alpha(pixels[width - 1]);
         int bl = Color.alpha(pixels[(height - 1) * width]);
@@ -1054,85 +969,6 @@ public class EpgManager {
         FileLogger.write(TAG, "台标透明化完成V7: " + width + "x" + height
                 + " transparent=" + transparent + " 四角alpha=[" + tl + "," + tr + "," + bl + "," + br + "]");
         return result;
-    }
-
-    private int mostCommonColorExact(ArrayList<Integer> samples) {
-        if (samples == null || samples.isEmpty()) return Color.WHITE;
-        HashMap<Integer, Integer> counts = new HashMap<>();
-        int best = Color.WHITE;
-        int bestCount = 0;
-        for (Integer c : samples) {
-            if (c == null) continue;
-            int n = counts.containsKey(c) ? counts.get(c) + 1 : 1;
-            counts.put(c, n);
-            if (n > bestCount) {
-                bestCount = n;
-                best = c;
-            }
-        }
-        return best;
-    }
-
-    private int mostCommonColorQuantized(ArrayList<Integer> samples) {
-        if (samples == null || samples.isEmpty()) return Color.WHITE;
-        HashMap<Integer, Integer> count = new HashMap<>();
-        int bestKey = 0, bestCount = 0;
-        for (Integer c : samples) {
-            if (c == null) continue;
-            int r = Color.red(c) >> 3, g = Color.green(c) >> 3, b = Color.blue(c) >> 3;
-            int key = (r << 10) | (g << 5) | b;
-            int n = count.containsKey(key) ? count.get(key) + 1 : 1;
-            count.put(key, n);
-            if (n > bestCount) { bestCount = n; bestKey = key; }
-        }
-        int r = ((bestKey >> 10) & 31) * 8 + 4;
-        int g = ((bestKey >> 5) & 31) * 8 + 4;
-        int b = (bestKey & 31) * 8 + 4;
-        return Color.rgb(Math.min(255,r), Math.min(255,g), Math.min(255,b));
-    }
-
-    private int enqueueBackground(int x, int y, int width, int height, int[] pixels,
-                                   boolean[] visited, int[] queue, int tail,
-                                   int br, int bgc, int bb, int tolerance2) {
-        if (x < 0 || x >= width || y < 0 || y >= height) return tail;
-        int pos = y * width + x;
-        if (visited[pos]) return tail;
-        if (!isBackgroundLike(pixels[pos], br, bgc, bb, tolerance2)) return tail;
-        visited[pos] = true;
-        queue[tail++] = pos;
-        return tail;
-    }
-
-    private boolean isBackgroundLike(int color, int br, int bg, int bb, int tolerance2) {
-        if (Color.alpha(color) == 0) return true;
-        int r = Color.red(color), g = Color.green(color), b = Color.blue(color);
-        int dr = r - br, dg = g - bg, db = b - bb;
-        if (dr * dr + dg * dg + db * db <= tolerance2) return true;
-        int max = Math.max(r, Math.max(g, b));
-        int min = Math.min(r, Math.min(g, b));
-        int neutral = max - min;
-        if (br >= 200 && bg >= 200 && bb >= 200) return min >= 175 && neutral <= 28;
-        if (br <= 80 && bg <= 80 && bb <= 80) return max <= 105 && neutral <= 28;
-        return neutral <= 18 && (max >= 220 || max <= 75);
-    }
-
-    private void addBackgroundSample(ArrayList<Integer> samples, int[] pixels, int width, int height, int x, int y) {
-        if (x < 0 || y < 0 || x >= width || y >= height) return;
-        int c = pixels[y * width + x];
-        if (Color.alpha(c) > 0) samples.add(Color.rgb(Color.red(c), Color.green(c), Color.blue(c)));
-    }
-
-    private int mostCommonColor(ArrayList<Integer> samples) {
-        if (samples == null || samples.isEmpty()) return Color.WHITE;
-        HashMap<Integer, Integer> counts = new HashMap<>();
-        int best = samples.get(0), bestCount = 0;
-        for (Integer c : samples) {
-            if (c == null) continue;
-            int n = counts.containsKey(c) ? counts.get(c) + 1 : 1;
-            counts.put(c, n);
-            if (n > bestCount) { bestCount = n; best = c; }
-        }
-        return best;
     }
 
     // ======================== 工具 ========================
@@ -1231,22 +1067,6 @@ public class EpgManager {
             this.channelId = channelId;
             this.displayName = displayName;
             this.iconUrl = iconUrl;
-        }
-    }
-
-    private static class CalendarDay {
-        final Date date;
-        final long millis;
-        private CalendarDay(Date date, long millis) { this.date = date; this.millis = millis; }
-        static CalendarDay startOfDay(Date date) {
-            java.util.Calendar c = java.util.Calendar.getInstance(TimeZone.getTimeZone("GMT+8:00"));
-            c.setTime(date);
-            c.set(java.util.Calendar.HOUR_OF_DAY, 0);
-            c.set(java.util.Calendar.MINUTE, 0);
-            c.set(java.util.Calendar.SECOND, 0);
-            c.set(java.util.Calendar.MILLISECOND, 0);
-            Date d = c.getTime();
-            return new CalendarDay(d, d.getTime());
         }
     }
 
