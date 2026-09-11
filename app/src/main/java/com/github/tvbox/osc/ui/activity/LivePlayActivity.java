@@ -142,6 +142,11 @@ public class LivePlayActivity extends BaseActivity {
     private static final float GESTURE_EDGE_RATIO = 0.18f;
     private static final long BOTTOM_INFO_SHOW_DURATION = 5000L;
 
+    // ★ 新增：时间/网速显示位置持久化 key
+    // 位置约定：0=左上角 1=右上角 2=左下角 3=右下角
+    private static final String KEY_LIVE_TIME_POSITION = "LIVE_TIME_POSITION";
+    private static final String KEY_LIVE_NET_SPEED_POSITION = "LIVE_NET_SPEED_POSITION";
+
     private final Runnable mEpgProgressRun = new Runnable() {
         @Override public void run() { updateEpgProgress(); mHandler.postDelayed(this, 30000L); }
     };
@@ -3165,16 +3170,33 @@ public class LivePlayActivity extends BaseActivity {
                 break;
             case 4:
                 boolean select = false;
+                boolean showPositionDialog = false;
                 switch (position) {
                     case 0:
-                        select = !Hawk.get(HawkConfig.LIVE_SHOW_TIME, false);
-                        Hawk.put(HawkConfig.LIVE_SHOW_TIME, select);
-                        showTime();
+                        // ★ 修改：显示时间 → 弹出位置选择对话框
+                        showPositionDialog = true;
+                        showDisplayPositionDialog("显示时间",
+                                Hawk.get(HawkConfig.LIVE_SHOW_TIME, false),
+                                Hawk.get(KEY_LIVE_TIME_POSITION, 0),
+                                (enabled, pos) -> {
+                                    Hawk.put(HawkConfig.LIVE_SHOW_TIME, enabled);
+                                    Hawk.put(KEY_LIVE_TIME_POSITION, pos);
+                                    showTime();
+                                    refreshDisplaySettingItems();
+                                });
                         break;
                     case 1:
-                        select = !Hawk.get(HawkConfig.LIVE_SHOW_NET_SPEED, false);
-                        Hawk.put(HawkConfig.LIVE_SHOW_NET_SPEED, select);
-                        showNetSpeed();
+                        // ★ 修改：显示网速 → 弹出位置选择对话框
+                        showPositionDialog = true;
+                        showDisplayPositionDialog("显示网速",
+                                Hawk.get(HawkConfig.LIVE_SHOW_NET_SPEED, false),
+                                Hawk.get(KEY_LIVE_NET_SPEED_POSITION, 0),
+                                (enabled, pos) -> {
+                                    Hawk.put(HawkConfig.LIVE_SHOW_NET_SPEED, enabled);
+                                    Hawk.put(KEY_LIVE_NET_SPEED_POSITION, pos);
+                                    showNetSpeed();
+                                    refreshDisplaySettingItems();
+                                });
                         break;
                     case 2:
                         select = !Hawk.get(HawkConfig.LIVE_CHANNEL_REVERSE, false);
@@ -3185,7 +3207,9 @@ public class LivePlayActivity extends BaseActivity {
                         Hawk.put(HawkConfig.LIVE_CROSS_GROUP, select);
                         break;
                 }
-                if (liveSettingItemAdapter != null) liveSettingItemAdapter.selectItem(position, select, false);
+                if (!showPositionDialog && liveSettingItemAdapter != null) {
+                    liveSettingItemAdapter.selectItem(position, select, false);
+                }
                 break;
             case 5:
                 if (position == ApiConfig.getLiveGroupIndex()) break;
@@ -3280,6 +3304,93 @@ public class LivePlayActivity extends BaseActivity {
         }
         mHandler.removeCallbacks(mHideSettingLayoutRun);
         mHandler.postDelayed(mHideSettingLayoutRun, postTimeout);
+    }
+
+    /**
+     * ★ 新增：根据位置索引设置视图在 FrameLayout 中的 gravity。
+     * 位置约定：0=左上 1=右上 2=左下 3=右下
+     */
+    private void applyOverlayPosition(View view, int position) {
+        if (view == null) return;
+        android.view.ViewParent parent = view.getParent();
+        if (!(parent instanceof FrameLayout)) return;
+
+        FrameLayout.LayoutParams lp;
+        if (view.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+            lp = (FrameLayout.LayoutParams) view.getLayoutParams();
+        } else {
+            ViewGroup.LayoutParams old = view.getLayoutParams();
+            int w = old != null ? old.width : ViewGroup.LayoutParams.WRAP_CONTENT;
+            int h = old != null ? old.height : ViewGroup.LayoutParams.WRAP_CONTENT;
+            lp = new FrameLayout.LayoutParams(w, h);
+        }
+        int margin = dp(24);
+        lp.leftMargin = margin;
+        lp.rightMargin = margin;
+        lp.topMargin = margin;
+        lp.bottomMargin = margin;
+        switch (position) {
+            case 1:  lp.gravity = Gravity.TOP    | Gravity.END;   break; // 右上
+            case 2:  lp.gravity = Gravity.BOTTOM | Gravity.START; break; // 左下
+            case 3:  lp.gravity = Gravity.BOTTOM | Gravity.END;   break; // 右下
+            default: lp.gravity = Gravity.TOP    | Gravity.START;        // 左上
+        }
+        view.setLayoutParams(lp);
+    }
+
+    /**
+     * ★ 新增：显示位置选择对话框（不显示 / 左上 / 右上 / 左下 / 右下）
+     */
+    private void showDisplayPositionDialog(String title, boolean currentEnabled, int currentPos,
+                                           DisplayPositionCallback callback) {
+        final String[] options = {"不显示", "左上角", "右上角", "左下角", "右下角"};
+        int checked = currentEnabled ? Math.max(0, Math.min(currentPos + 1, options.length - 1)) : 0;
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setSingleChoiceItems(options, checked, (dialog, which) -> {
+                    dialog.dismiss();
+                    if (which == 0) callback.onResult(false, 0);
+                    else callback.onResult(true, which - 1);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private interface DisplayPositionCallback {
+        void onResult(boolean enabled, int position);
+    }
+
+    /** ★ 新增：位置显示文案 */
+    private String getPositionLabel(boolean enabled, int pos) {
+        if (!enabled) return "关闭";
+        switch (pos) {
+            case 1:  return "右上角";
+            case 2:  return "左下角";
+            case 3:  return "右下角";
+            default: return "左上角";
+        }
+    }
+
+    /** ★ 新增：从对话框返回后刷新「显示设置」分组的条目状态与文案 */
+    private void refreshDisplaySettingItems() {
+        if (liveSettingItemAdapter == null || liveSettingGroupAdapter == null) return;
+        if (liveSettingGroupAdapter.getSelectedGroupIndex() != 4) return;
+        LiveSettingGroup group = findSettingGroupByIndex(4);
+        if (group == null || group.getLiveSettingItems() == null) return;
+        List<LiveSettingItem> items = group.getLiveSettingItems();
+        if (items.size() > 0) {
+            boolean enabled = Hawk.get(HawkConfig.LIVE_SHOW_TIME, false);
+            int pos = Hawk.get(KEY_LIVE_TIME_POSITION, 0);
+            items.get(0).setItemSelected(enabled);
+            items.get(0).setItemName("显示时间：" + getPositionLabel(enabled, pos));
+        }
+        if (items.size() > 1) {
+            boolean enabled = Hawk.get(HawkConfig.LIVE_SHOW_NET_SPEED, false);
+            int pos = Hawk.get(KEY_LIVE_NET_SPEED_POSITION, 0);
+            items.get(1).setItemSelected(enabled);
+            items.get(1).setItemName("显示网速：" + getPositionLabel(enabled, pos));
+        }
+        liveSettingItemAdapter.notifyDataSetChanged();
     }
 
     private void showSourceManageDialog() {
@@ -3910,8 +4021,19 @@ public class LivePlayActivity extends BaseActivity {
 
         LiveSettingGroup displayGroup = findSettingGroupByIndex(4);
         if (displayGroup != null && displayGroup.getLiveSettingItems() != null && displayGroup.getLiveSettingItems().size() > 3) {
-            displayGroup.getLiveSettingItems().get(0).setItemSelected(Hawk.get(HawkConfig.LIVE_SHOW_TIME, false));
-            displayGroup.getLiveSettingItems().get(1).setItemSelected(Hawk.get(HawkConfig.LIVE_SHOW_NET_SPEED, false));
+            // ★ 修改：显示当前选择的方位到条目名称上
+            boolean timeEnabled = Hawk.get(HawkConfig.LIVE_SHOW_TIME, false);
+            int timePos = Hawk.get(KEY_LIVE_TIME_POSITION, 0);
+            boolean speedEnabled = Hawk.get(HawkConfig.LIVE_SHOW_NET_SPEED, false);
+            int speedPos = Hawk.get(KEY_LIVE_NET_SPEED_POSITION, 0);
+
+            LiveSettingItem timeItem = displayGroup.getLiveSettingItems().get(0);
+            LiveSettingItem speedItem = displayGroup.getLiveSettingItems().get(1);
+            timeItem.setItemSelected(timeEnabled);
+            timeItem.setItemName("显示时间：" + getPositionLabel(timeEnabled, timePos));
+            speedItem.setItemSelected(speedEnabled);
+            speedItem.setItemName("显示网速：" + getPositionLabel(speedEnabled, speedPos));
+
             displayGroup.getLiveSettingItems().get(2).setItemSelected(Hawk.get(HawkConfig.LIVE_CHANNEL_REVERSE, false));
             displayGroup.getLiveSettingItems().get(3).setItemSelected(Hawk.get(HawkConfig.LIVE_CROSS_GROUP, false));
         }
@@ -4033,7 +4155,11 @@ public class LivePlayActivity extends BaseActivity {
     void showTime() {
         if (Hawk.get(HawkConfig.LIVE_SHOW_TIME, false)) {
             mHandler.post(mUpdateTimeRun);
-            if (tvTime != null) tvTime.setVisibility(View.VISIBLE);
+            if (tvTime != null) {
+                tvTime.setVisibility(View.VISIBLE);
+                // ★ 新增：根据保存的位置应用显示方位
+                applyOverlayPosition(tvTime, Hawk.get(KEY_LIVE_TIME_POSITION, 0));
+            }
         } else {
             mHandler.removeCallbacks(mUpdateTimeRun);
             if (tvTime != null) tvTime.setVisibility(View.GONE);
@@ -4051,8 +4177,16 @@ public class LivePlayActivity extends BaseActivity {
 
     private void showNetSpeed() {
         mHandler.removeCallbacks(mUpdateNetSpeedRun);
-        if (Hawk.get(HawkConfig.LIVE_SHOW_NET_SPEED, false)) { mHandler.post(mUpdateNetSpeedRun); if (tvNetSpeed != null) tvNetSpeed.setVisibility(View.VISIBLE); }
-        else if (tvNetSpeed != null) tvNetSpeed.setVisibility(View.GONE);
+        if (Hawk.get(HawkConfig.LIVE_SHOW_NET_SPEED, false)) {
+            mHandler.post(mUpdateNetSpeedRun);
+            if (tvNetSpeed != null) {
+                tvNetSpeed.setVisibility(View.VISIBLE);
+                // ★ 新增：根据保存的位置应用显示方位
+                applyOverlayPosition(tvNetSpeed, Hawk.get(KEY_LIVE_NET_SPEED_POSITION, 0));
+            }
+        } else if (tvNetSpeed != null) {
+            tvNetSpeed.setVisibility(View.GONE);
+        }
     }
 
     private Runnable mUpdateNetSpeedRun = new Runnable() {
