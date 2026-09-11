@@ -73,6 +73,14 @@ import okhttp3.Response;
  *      任一个候选在 XMLTV 命中，就把 原始频道名 → 该候选 回填到
  *      dynamic_epg_ids.json；
  *   4) 全部未命中 → 视为 XMLTV 中确实没有该频道，不做处理。
+ *
+ * 分组切换自动预热策略：
+ *   UI 侧在分组切换时通常会为每个频道调 loadProcessedChannelIcon 加载台标。
+ *   本类利用这一入口：凡是 loadProcessedChannelIcon 被调用，如果当前频道
+ *   所属的 EPG 分组尚未解析，就把该频道名暂存到 pendingEpgWarmup，150ms
+ *   内聚合所有频道名后异步调用一次 loadChannelGroup，解析整个分组的
+ *   XMLTV，从而使 getProgramsForChannel 立刻有数据。同时 loadChannelGroup
+ *   完成后又反过来为整个分组的频道预热台标，两边互为兜底。
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -91,6 +99,9 @@ public class EpgManager {
     /** GitHub 台标仓库基础地址（与参考实现保持一致）。 */
     private static final String GITHUB_LOGO_BASE_URL =
             "https://raw.githubusercontent.com/tytestelle/logo/main/ico/logo/";
+
+    /** 分组切换时聚合 EPG 预热的延迟窗口（毫秒）。 */
+    private static final long EPG_WARMUP_DELAY_MS = 150L;
 
     private static EpgManager instance;
 
@@ -117,6 +128,9 @@ public class EpgManager {
 
     // 动态回填映射：频道名 -> 从 XMLTV 里精确匹配到的候选 epgid。
     private final Map<String, String> dynamicEpgIds = new HashMap<>();
+
+    // 分组切换时，由 loadProcessedChannelIcon 收集的待预热频道名。
+    private final Set<String> pendingEpgWarmup = Collections.synchronizedSet(new LinkedHashSet<>());
 
     // Parsed XMLTV indexes. Access is synchronized through parseLock.
     private final Object parseLock = new Object();
@@ -643,6 +657,49 @@ public class EpgManager {
         }
     }
 
+    // ======================== 分组 EPG 预热入口 ========================
+
+    /**
+     * 主线程上延迟执行的聚合任务：把短时间内收集到的频道名合并成一次
+     * loadChannelGroup 调用，避免 UI 逐个频道触发时把同一分组解析多次。
+     */
+    private final Runnable epgWarmupTask = new Runnable() {
+        @Override
+        public void run() {
+            List<String> names;
+            synchronized (pendingEpgWarmup) {
+                if (pendingEpgWarmup.isEmpty()) return;
+                names = new ArrayList<>(pendingEpgWarmup);
+                pendingEpgWarmup.clear();
+            }
+            FileLogger.write(TAG, "EPG自动预热触发: 频道数=" + names.size());
+            loadChannelGroup(names, null);
+        }
+    };
+
+    /**
+     * 由 loadProcessedChannelIcon 触发的 EPG 预热请求。
+     * 仅当该频道所属分组尚未解析时才加入待预热集合。
+     */
+    private void requestEpgWarmUp(String channelName) {
+        if (TextUtils.isEmpty(channelName)) return;
+        if (parsed) {
+            String epgid = getEpgIdByChannelName(channelName);
+            if (!TextUtils.isEmpty(epgid)) {
+                synchronized (parseLock) {
+                    if (loadedEpgIds.contains(epgid)) return;
+                }
+            }
+        }
+        pendingEpgWarmup.add(channelName);
+        mainHandler.removeCallbacks(epgWarmupTask);
+        mainHandler.postDelayed(epgWarmupTask, EPG_WARMUP_DELAY_MS);
+    }
+
+    /**
+     * 主动调用：解析整个频道分组的 EPG（分组切换时用）。
+     * 解析完成后会为整个分组的频道触发台标预热（不影响 EPG 本身）。
+     */
     public void loadChannelGroup(final List<String> channelNames, final Runnable onComplete) {
         if (channelNames == null || channelNames.isEmpty()) {
             if (onComplete != null) mainHandler.post(onComplete);
@@ -682,14 +739,12 @@ public class EpgManager {
         }
 
         epgExecutor.execute(() -> {
-            // 待回填的动态映射：一组 [原始频道名, 命中的候选epgid]
             final List<String[]> backfill = new ArrayList<>();
             try {
                 synchronized (parseLock) {
                     if (!(loadedEpgIds.equals(requested) && parsed)) {
                         parseXmlForEpgIds(epgFile, requested);
                     }
-                    // 不管是否重新解析，都基于当前索引判断候选是否命中。
                     // 只有真正命中 XMLTV display-name 的候选才会被回填。
                     for (Map.Entry<String, Set<String>> e : derivedToOriginal.entrySet()) {
                         String candidate = e.getKey();
@@ -723,6 +778,11 @@ public class EpgManager {
                 FileLogger.write(TAG, "当前频道组 EPG 懒加载失败", e);
             } finally {
                 if (onComplete != null) mainHandler.post(onComplete);
+                // EPG 解析完成后，反过来为整个分组的频道预热台标（不触发 EPG 预热）。
+                for (String name : channelNames) {
+                    if (TextUtils.isEmpty(name)) continue;
+                    doLoadProcessedChannelIcon(name, null);
+                }
             }
         });
     }
@@ -783,13 +843,21 @@ public class EpgManager {
     // ======================== 台标：本地 → EPG → GitHub ========================
 
     /**
-     * 按顺序加载台标：
-     *   1) 本地 logos/{epgid}.png 存在 → 直接返回
-     *   2) EPG 中该 epgid 有 icon 地址 → 下载 → 透明化 → 保存
-     *   3) GitHub 仓库 {GITHUB_LOGO_BASE_URL}{epgid}.png → 下载 → 原样保存
-     *   4) 全部失败 → 回调 null，UI 不显示台标
+     * 公开入口：加载台标。同时作为“分组切换时自动预热整个分组 EPG”的触发点——
+     * UI 侧在分组切换时为每个频道调它加载台标，此处收集频道名并聚合触发
+     * loadChannelGroup，从而让整个分组的节目预告也自动加载。
      */
     public void loadProcessedChannelIcon(final String channelName, final IconCallback callback) {
+        // 分组切换时 UI 会为每个频道调这里，顺便请求 EPG 预热。
+        requestEpgWarmUp(channelName);
+        doLoadProcessedChannelIcon(channelName, callback);
+    }
+
+    /**
+     * 内部方法：只做台标下载，不触发 EPG 预热。
+     * loadChannelGroup 完成后会调这里为整个分组预热台标，形成双向兜底。
+     */
+    private void doLoadProcessedChannelIcon(final String channelName, final IconCallback callback) {
         if (TextUtils.isEmpty(channelName)) {
             if (callback != null) mainHandler.post(() -> callback.onIcon(null));
             return;
