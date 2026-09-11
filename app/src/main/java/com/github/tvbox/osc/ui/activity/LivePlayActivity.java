@@ -2608,30 +2608,26 @@ public class LivePlayActivity extends BaseActivity {
             ku9GuideChannelList.setSelection(selected);
         }
 
-        // 先用当前内存中已有数据尝试同步构建日期栏；若 EPG 尚未解析成功，日期栏可能暂时为空，
-        // 随后由 ensureKu9GuideEpgLoaded 的异步回调重新构建。
+        // 先用已有数据同步构建日期栏；即使 EPG 尚未加载完成，也会用固定日期兜底
         rebuildKu9GuideDatesForChannel(selected);
-
-        // 同步刷新日期栏视图
-        if (ku9GuideDateAdapter != null) {
-            ku9GuideDateAdapter.notifyDataSetChanged();
-        }
-
-        ensureKu9GuideEpgLoaded(selected);
-
-        // 同步 EPG 场景：日期栏已经填充完毕，直接定位今天/保留日期并加载节目。
-        if (ku9GuideDateAdapter.getItemCount() > 0) {
-            int di = findKu9GuideDateIndex(getSelectedKu9GuideDateKey());
-            if (di < 0) di = findTodayGuideDateIndex();
+        if (ku9GuideDateAdapter != null) ku9GuideDateAdapter.notifyDataSetChanged();
+        ku9GuideDateList.post(() -> {
+            if (ku9GuideDateAdapter == null) return;
+            int di = findTodayGuideDateIndex();
             if (di < 0) di = 0;
-            di = Math.max(0, Math.min(di, ku9GuideDateAdapter.getItemCount() - 1));
-            ku9GuideDateAdapter.setSelectedIndex(di);
-            ku9GuideDateList.setSelection(di);
-            if (ku9GuideChannelAdapter.getItemCount() > 0) {
-                LiveEpgDate selectedDate = ku9GuideDateAdapter.getItem(di);
-                if (selectedDate != null) loadKu9GuidePrograms(selected, selectedDate.getDateParamVal());
+            if (ku9GuideDateAdapter.getItemCount() > 0) {
+                di = Math.max(0, Math.min(di, ku9GuideDateAdapter.getItemCount() - 1));
+                ku9GuideDateAdapter.setSelectedIndex(di);
+                ku9GuideDateList.setSelection(di);
+                if (ku9GuideChannelAdapter.getItemCount() > 0) {
+                    LiveEpgDate selectedDate = ku9GuideDateAdapter.getItem(di);
+                    if (selectedDate != null) loadKu9GuidePrograms(selected, selectedDate.getDateParamVal());
+                }
             }
-        }
+        });
+
+        // 打开节目单时再做一次 hash 检查：hash 变化才下载，随后用真实 EPG 日期刷新日期栏
+        ensureKu9GuideEpgLoaded(selected);
 
         if (ku9GuideChannelGroupButton != null) {
             ku9GuideChannelGroupButton.setVisibility(View.VISIBLE);
@@ -2643,8 +2639,7 @@ public class LivePlayActivity extends BaseActivity {
     private void ensureKu9GuideEpgLoaded(int channelPosition) {
         if (!ku9GuideShowing || !isXmlEpgAddress(epgStringAddress) || ku9GuideChannelAdapter == null) return;
         if (channelPosition < 0 || channelPosition >= ku9GuideChannelAdapter.getItemCount()) channelPosition = 0;
-        final int requestChannelPosition = channelPosition;
-        LiveChannelItem item = ku9GuideChannelAdapter.getItem(requestChannelPosition);
+        LiveChannelItem item = ku9GuideChannelAdapter.getItem(channelPosition);
         if (item == null) return;
         if (ku9GuideEpgLoadRequested) return;
         ku9GuideEpgLoadRequested = true;
@@ -2659,25 +2654,36 @@ public class LivePlayActivity extends BaseActivity {
                         groupNames.add(ci.getChannelName());
                     }
                 }
-                EpgManager manager = EpgManager.getInstance(LivePlayActivity.this);
-                manager.loadChannelGroup(groupNames, () -> {
+                EpgManager.getInstance(LivePlayActivity.this).loadChannelGroup(groupNames, () -> {
                     if (!ku9GuideShowing || ku9GuideChannelAdapter == null || ku9GuideChannelAdapter.getItemCount() == 0) return;
                     int cp = ku9GuideChannelFocusPosition >= 0
                             ? ku9GuideChannelFocusPosition : Math.max(0, currentLiveChannelIndex);
                     cp = Math.max(0, Math.min(cp, ku9GuideChannelAdapter.getItemCount() - 1));
 
                     String preservedDateKey = getSelectedKu9GuideDateKey();
+                    // EPG 已解析完成，这里会拿到真实日期；如果仍为空，会走 rebuild 里的固定日期兜底
                     rebuildKu9GuideDatesForChannel(cp);
-                    ku9GuideDateAdapter.notifyDataSetChanged();
+                    if (ku9GuideDateAdapter != null) ku9GuideDateAdapter.notifyDataSetChanged();
                     if (ku9GuideDateAdapter.getItemCount() == 0) return;
-                    int di = findKu9GuideDateIndex(preservedDateKey);
-                    if (di < 0) di = findTodayGuideDateIndex();
-                    if (di < 0) di = 0;
-                    di = Math.max(0, Math.min(di, ku9GuideDateAdapter.getItemCount() - 1));
-                    ku9GuideDateAdapter.setSelectedIndex(di);
-                    ku9GuideDateList.setSelection(di);
-                    LiveEpgDate selectedDate = ku9GuideDateAdapter.getItem(di);
-                    if (selectedDate != null) loadKu9GuidePrograms(cp, selectedDate.getDateParamVal());
+
+                    // 让 UI 先完成一次布局，再设置选中项并触发节目列表刷新
+                    ku9GuideDateList.post(() -> {
+                        if (!ku9GuideShowing || ku9GuideDateAdapter == null) return;
+                        int di = findKu9GuideDateIndex(preservedDateKey);
+                        if (di < 0) di = findTodayGuideDateIndex();
+                        if (di < 0) di = 0;
+                        di = Math.max(0, Math.min(di, ku9GuideDateAdapter.getItemCount() - 1));
+                        ku9GuideDateAdapter.setSelectedIndex(di);
+                        ku9GuideDateList.setSelection(di);
+                        LiveEpgDate selectedDate = ku9GuideDateAdapter.getItem(di);
+                        if (selectedDate != null) {
+                            // 强制立即加载当前选中日期的节目列表
+                            int cpFinal = Math.max(0, Math.min(
+                                    ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
+                                    ku9GuideChannelAdapter.getItemCount() - 1));
+                            loadKu9GuidePrograms(cpFinal, selectedDate.getDateParamVal());
+                        }
+                    });
                 });
             }
             @Override public void onError(String msg) {
@@ -2726,6 +2732,7 @@ public class LivePlayActivity extends BaseActivity {
         LiveChannelItem item = ku9GuideChannelAdapter.getItem(channelPosition);
         if (item == null) return;
         String channelName = item.getChannelName();
+
         List<Date> available = new ArrayList<>();
         try {
             if (isXmlEpgAddress(epgStringAddress)) {
@@ -2744,13 +2751,14 @@ public class LivePlayActivity extends BaseActivity {
         todayCal.set(Calendar.SECOND, 0); todayCal.set(Calendar.MILLISECOND, 0);
         String todayKey = md.format(todayCal.getTime());
 
+        // 【关键修改】无论是 XMLTV 还是模板 EPG，只要 available 为空，
+        // 就用“今天 -2 ~ 今天 +7”的固定日期填充，保证日期栏永远不为空。
+        // XMLTV 后续解析完成会再调用此方法覆盖为真实日期。
         if (available.isEmpty()) {
-            if (!isXmlEpgAddress(epgStringAddress)) {
-                for (int i = -2; i <= 7; i++) {
-                    Calendar d = (Calendar) todayCal.clone();
-                    d.add(Calendar.DAY_OF_MONTH, i);
-                    addKu9GuideDateItem(d.getTime(), i + 2, weekday, md, todayKey);
-                }
+            for (int i = -2; i <= 7; i++) {
+                Calendar d = (Calendar) todayCal.clone();
+                d.add(Calendar.DAY_OF_MONTH, i);
+                addKu9GuideDateItem(d.getTime(), i + 2, weekday, md, todayKey);
             }
         } else {
             int idx = 0;
