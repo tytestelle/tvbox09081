@@ -608,7 +608,8 @@ public class LivePlayActivity extends BaseActivity {
             finish();
         }
     }
-        // ========================================================================
+    
+    // ========================================================================
     // ========== 底部信息栏（纯代码创建，无 XML 依赖） ==========
     // ========================================================================
     private void setupBottomInfoBar() {
@@ -636,17 +637,19 @@ public class LivePlayActivity extends BaseActivity {
         llBottomInfoBar.setGravity(Gravity.CENTER_VERTICAL);
         llBottomInfoBar.setVisibility(View.GONE);
 
-        // ★ 位置和尺寸：底部左侧，宽度为屏幕 60%，圆角
+        // ★ 位置和尺寸：底部左右对称，宽度为屏幕 90%，左右各留 5% 边距，圆角
         llBottomInfoBar.post(() -> {
             int screenW = getResources().getDisplayMetrics().widthPixels;
             int screenH = getResources().getDisplayMetrics().heightPixels;
             ViewGroup.LayoutParams lp = llBottomInfoBar.getLayoutParams();
             if (lp instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams flp = (FrameLayout.LayoutParams) lp;
-                flp.width = Math.round(screenW * 0.60f);
+                float widthRatio = 0.90f; // 屏幕 90% 宽度
+                float marginRatio = 0.05f; // 左右各 5% 边距
+                flp.width = Math.round(screenW * widthRatio);
                 flp.height = FrameLayout.LayoutParams.WRAP_CONTENT;
                 flp.gravity = Gravity.BOTTOM | Gravity.START;
-                flp.leftMargin = Math.round(screenW * 0.05f);
+                flp.leftMargin = Math.round(screenW * marginRatio);
                 flp.bottomMargin = Math.round(screenH * 0.03f);
                 llBottomInfoBar.setLayoutParams(flp);
             }
@@ -655,11 +658,8 @@ public class LivePlayActivity extends BaseActivity {
         // ========== 1. 左侧大台标 ==========
         FrameLayout iconBox = new FrameLayout(this);
         iconBox.setLayoutParams(new LinearLayout.LayoutParams(dp(96), dp(96)));
-        // 圆角背景
-        android.graphics.drawable.GradientDrawable iconBg = new android.graphics.drawable.GradientDrawable();
-        iconBg.setColor(0x22FFFFFF);
-        iconBg.setCornerRadius(dp(10));
-        iconBox.setBackground(iconBg);
+        // ★ 去掉台标框的底色，让台标透明融入
+        iconBox.setBackgroundColor(Color.TRANSPARENT);
 
         imgLiveIconBottom = new ImageView(this);
         imgLiveIconBottom.setLayoutParams(new FrameLayout.LayoutParams(
@@ -1537,7 +1537,8 @@ public class LivePlayActivity extends BaseActivity {
         }
         return trimName;
     }
-        @SuppressLint("SetTextI18n")
+    
+    @SuppressLint("SetTextI18n")
     private void showBottomEpg() {
         if (isSHIYI) return;
         if (channel_Name == null || channel_Name.getChannelName() == null) return;
