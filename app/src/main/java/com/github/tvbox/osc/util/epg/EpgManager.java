@@ -9,6 +9,7 @@ import android.text.TextUtils;
 
 import com.github.tvbox.osc.util.FileLogger;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -61,6 +62,15 @@ import okhttp3.Response;
  *   3) EPG 没有或下载失败 → 到 GitHub 仓库下载 {epgid}.png
  *        （GitHub 仓库本身已是透明 PNG，原样保存，不再透明化）
  *   4) 全部失败 → 返回 null，调用方不显示台标
+ *
+ * EPG ID 解析策略：
+ *   1) 优先查 assets/epg_data.json 的静态映射；
+ *   2) 未命中时查运行期回填的动态映射 dynamic_epg_ids.json（等价于把
+ *      “新条目”补进 epg_data.json，下次启动直接命中）；
+ *   3) 仍未命中且频道名以“台”结尾时，把 “xx台”（原名称）与 “xx”（去掉
+ *      “台”）作为候选 epgid，在 XMLTV 的 display-name 里做精确匹配；
+ *   4) 命中则把 频道名→候选epgid 回填到 dynamic_epg_ids.json；未命中则
+ *      视为 XML 中确实没有该频道，不做任何处理。
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -68,6 +78,13 @@ public class EpgManager {
     private static final String EPG_FILE_NAME = "epg.xml";
     private static final String HASH_FILE_NAME = "epg.hash";
     private static final String LOGO_DIR_NAME = "logos";
+
+    /**
+     * 运行期回填的 EPG ID 映射，语义上等价于“往 epg_data.json 里补条目”。
+     * assets 里的 epg_data.json 是只读的，无法直接写回，所以用独立文件承载。
+     * 静态映射优先级高于动态映射。
+     */
+    private static final String DYNAMIC_EPG_IDS_FILE = "dynamic_epg_ids.json";
 
     /** GitHub 台标仓库基础地址（与参考实现保持一致）。 */
     private static final String GITHUB_LOGO_BASE_URL =
@@ -85,6 +102,7 @@ public class EpgManager {
     private final File epgFile;
     private final File localHashFile;
     private final File logoDir;
+    private final File dynamicEpgIdsFile;
 
     private volatile String epgUrl;
     private volatile boolean parsing;
@@ -94,6 +112,9 @@ public class EpgManager {
 
     // epg_data.json: every variant name maps to one shared epgid.
     private final Map<String, String> nameToEpgId = new HashMap<>();
+
+    // 动态回填映射：频道名 -> 从 XMLTV 里精确匹配到的候选 epgid。
+    private final Map<String, String> dynamicEpgIds = new HashMap<>();
 
     // Parsed XMLTV indexes. Access is synchronized through parseLock.
     private final Object parseLock = new Object();
@@ -143,10 +164,12 @@ public class EpgManager {
         localHashFile = new File(epgDir, HASH_FILE_NAME);
         logoDir = new File(context.getFilesDir(), LOGO_DIR_NAME);
         if (!logoDir.exists()) logoDir.mkdirs();
+        dynamicEpgIdsFile = new File(context.getFilesDir(), DYNAMIC_EPG_IDS_FILE);
 
         epgUrl = normalizeEpgUrl(EpgSettings.getEpgUrl(context));
         if (TextUtils.isEmpty(epgUrl)) loadDefaultEpgUrl();
         loadEpgDataMap();
+        loadDynamicEpgIds();
     }
 
     // ======================== epg_data.json ========================
@@ -175,10 +198,86 @@ public class EpgManager {
         }
     }
 
+    // ======================== 动态 EPG ID 映射 ========================
+    /**
+     * 加载运行期回填的映射（相当于“新增到 epg_data.json”的条目）。
+     * 静态映射始终优先于动态映射，保证 assets 里手动维护的值不会被覆盖。
+     */
+    private void loadDynamicEpgIds() {
+        synchronized (dynamicEpgIds) {
+            dynamicEpgIds.clear();
+            if (!dynamicEpgIdsFile.exists() || dynamicEpgIdsFile.length() == 0) return;
+            try (InputStream is = new FileInputStream(dynamicEpgIdsFile)) {
+                JsonObject root = JsonParser.parseReader(new InputStreamReader(is, StandardCharsets.UTF_8)).getAsJsonObject();
+                for (Map.Entry<String, JsonElement> e : root.entrySet()) {
+                    if (e.getKey() == null || e.getValue() == null || e.getValue().isJsonNull()) continue;
+                    if (!e.getValue().isJsonPrimitive()) continue;
+                    String key = e.getKey().trim();
+                    String value = e.getValue().getAsString();
+                    if (!key.isEmpty() && !TextUtils.isEmpty(value)) {
+                        dynamicEpgIds.put(key, value.trim());
+                    }
+                }
+                FileLogger.write(TAG, "加载动态 EPG 映射成功，共 " + dynamicEpgIds.size() + " 条");
+            } catch (Exception e) {
+                FileLogger.write(TAG, "加载动态 EPG 映射失败", e);
+            }
+        }
+    }
+
+    private void saveDynamicEpgIds() {
+        synchronized (dynamicEpgIds) {
+            try {
+                JsonObject root = new JsonObject();
+                for (Map.Entry<String, String> e : dynamicEpgIds.entrySet()) {
+                    if (e.getKey() == null || e.getValue() == null) continue;
+                    root.addProperty(e.getKey(), e.getValue());
+                }
+                File tmp = new File(context.getFilesDir(), DYNAMIC_EPG_IDS_FILE + ".tmp");
+                try (FileOutputStream out = new FileOutputStream(tmp)) {
+                    out.write(root.toString().getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                    try { out.getFD().sync(); } catch (Exception ignored) { }
+                }
+                if (dynamicEpgIdsFile.exists()) dynamicEpgIdsFile.delete();
+                if (!tmp.renameTo(dynamicEpgIdsFile)) {
+                    copyFile(tmp, dynamicEpgIdsFile);
+                    tmp.delete();
+                }
+                FileLogger.write(TAG, "动态 EPG 映射已保存，共 " + dynamicEpgIds.size() + " 条");
+            } catch (Exception e) {
+                FileLogger.write(TAG, "保存动态 EPG 映射失败", e);
+            }
+        }
+    }
+
+    /**
+     * 从频道名推导候选 EPG ID。
+     * 规则：当名称以“台”结尾且长度 > 1 时，候选为 [xx台, xx]（xx 为去掉“台”）。
+     * 仅在 epg_data.json 与 dynamic_epg_ids.json 均未命中时使用。
+     */
+    private List<String> deriveEpgIdCandidates(String channelName) {
+        List<String> candidates = new ArrayList<>();
+        if (TextUtils.isEmpty(channelName)) return candidates;
+        String name = channelName.trim();
+        if (name.length() > 1 && name.endsWith("台")) {
+            String without = name.substring(0, name.length() - 1).trim();
+            if (!without.isEmpty()) {
+                candidates.add(name);
+                candidates.add(without);
+            }
+        }
+        return candidates;
+    }
+
     private String getEpgIdByChannelName(String channelName) {
         if (TextUtils.isEmpty(channelName)) return null;
         synchronized (nameToEpgId) {
-            return nameToEpgId.get(channelName);
+            String v = nameToEpgId.get(channelName);
+            if (v != null) return v;
+        }
+        synchronized (dynamicEpgIds) {
+            return dynamicEpgIds.get(channelName);
         }
     }
 
@@ -545,9 +644,27 @@ public class EpgManager {
         }
 
         final Set<String> requested = new HashSet<>();
+        // 记录“推导候选 -> 原始频道名”，解析成功后用于回填动态映射。
+        final Map<String, String> derivedToOriginal = new HashMap<>();
+
         for (String name : channelNames) {
+            if (TextUtils.isEmpty(name)) continue;
             String epgid = getEpgIdByChannelName(name);
-            if (!TextUtils.isEmpty(epgid)) requested.add(epgid);
+            if (!TextUtils.isEmpty(epgid)) {
+                requested.add(epgid);
+                continue;
+            }
+            // epg_data.json 与 dynamic_epg_ids.json 均未命中 → 从频道名推导候选。
+            List<String> candidates = deriveEpgIdCandidates(name);
+            if (!candidates.isEmpty()) {
+                for (String cand : candidates) {
+                    requested.add(cand);
+                    if (!derivedToOriginal.containsKey(cand)) {
+                        derivedToOriginal.put(cand, name);
+                    }
+                }
+                FileLogger.write(TAG, "EPG候选推导: name=[" + name + "] 候选=" + candidates);
+            }
         }
 
         if (requested.isEmpty() || !epgFile.exists() || epgFile.length() == 0) {
@@ -556,13 +673,40 @@ public class EpgManager {
         }
 
         epgExecutor.execute(() -> {
+            // 待回填的动态映射：[原始频道名, 命中的候选epgid]
+            final List<String[]> backfill = new ArrayList<>();
             try {
                 synchronized (parseLock) {
-                    if (loadedEpgIds.equals(requested) && parsed) {
-                        // 同一分组重复进入，不重复扫描 XML。
-                    } else {
+                    if (!(loadedEpgIds.equals(requested) && parsed)) {
                         parseXmlForEpgIds(epgFile, requested);
                     }
+                    // 不管是否重新解析，都基于当前索引判断候选是否命中。
+                    // 只有真正命中 XMLTV display-name 的候选才会被回填。
+                    for (Map.Entry<String, String> e : derivedToOriginal.entrySet()) {
+                        String candidate = e.getKey();
+                        if (xmlChannelIdsByEpgId.containsKey(candidate)) {
+                            backfill.add(new String[]{e.getValue(), candidate});
+                        }
+                    }
+                }
+
+                if (!backfill.isEmpty()) {
+                    boolean changed = false;
+                    synchronized (dynamicEpgIds) {
+                        for (String[] pair : backfill) {
+                            String originalName = pair[0];
+                            String candidate = pair[1];
+                            if (originalName == null || candidate == null) continue;
+                            String existing = dynamicEpgIds.get(originalName);
+                            if (candidate.equals(existing)) continue;
+                            dynamicEpgIds.put(originalName, candidate);
+                            changed = true;
+                            FileLogger.write(TAG, "EPG映射回填: name=[" + originalName + "] -> epgid=[" + candidate + "]");
+                        }
+                    }
+                    if (changed) saveDynamicEpgIds();
+                } else if (!derivedToOriginal.isEmpty()) {
+                    FileLogger.write(TAG, "EPG候选未命中XMLTV，不做处理: 候选=" + derivedToOriginal.keySet());
                 }
             } catch (Exception e) {
                 FileLogger.write(TAG, "当前频道组 EPG 懒加载失败", e);
@@ -582,7 +726,7 @@ public class EpgManager {
         if (!parsed) return result;
         String epgid = getEpgIdByChannelName(channelName);
         if (TextUtils.isEmpty(epgid)) {
-            FileLogger.write(TAG, "EPG严格映射失败① 原始频道名未命中 epg_data.json name: name=[" + channelName + "]");
+            FileLogger.write(TAG, "EPG严格映射失败① 原始频道名未命中 epg_data.json/dynamic_epg_ids.json: name=[" + channelName + "]");
             return result;
         }
         synchronized (parseLock) {
@@ -593,8 +737,8 @@ public class EpgManager {
             }
             List<EpgProgram> all = programsByEpgId.get(epgid);
             if (all != null) result.addAll(all);
-            FileLogger.write(TAG, "EPG严格映射完成: name=[" + channelName + "] -> name匹配epgid=[" + epgid
-                    + "] -> display-name=[" + epgid + "] -> channel ids=" + ids
+            FileLogger.write(TAG, "EPG严格映射完成: name=[" + channelName + "] -> epgid=[" + epgid
+                    + "] -> channel ids=" + ids
                     + " -> 全部programme=" + result.size() + " -> 日期=" + buildProgramDateKeys(result));
         }
         return result;
@@ -644,7 +788,7 @@ public class EpgManager {
         }
         final String epgid = getEpgIdByChannelName(channelName);
         if (TextUtils.isEmpty(epgid)) {
-            FileLogger.write(TAG, "台标加载失败：频道未在 epg_data.json 命中: name=[" + channelName + "]");
+            FileLogger.write(TAG, "台标加载失败：频道未在 epg_data.json/dynamic_epg_ids.json 命中: name=[" + channelName + "]");
             if (callback != null) mainHandler.post(() -> callback.onIcon(null));
             return;
         }
