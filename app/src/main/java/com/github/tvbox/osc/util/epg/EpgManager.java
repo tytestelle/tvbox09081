@@ -1090,16 +1090,6 @@ public class EpgManager {
         }
     }
 
-    /**
-     * 台标背景透明化（V3）。
-     *
-     * 针对 JPG 有损压缩白底残留问题做了如下改进：
-     * 1. 全局背景色估计：放宽浅色簇统计条件（max>=180, spread<=60），最多取 8 种背景色，
-     *    彻底覆盖 JPEG 压缩产生的各种深浅不一的米白/浅灰。
-     * 2. 多级背景判定阈值放宽到 120/85/55（原来 85/55/35），最后一档辅助条件放宽到
-     *    max>=160, spread<=70，能穿透更严重的 JPEG 色偏。
-     * 3. 抗锯齿阶段扩大到 90*90 && spread<=80，把边缘残留的浅灰过渡像素全部消灭。
-     */
     private String readSmallText(File file) {
         if (file == null || !file.isFile()) return "";
         try (InputStream in = new FileInputStream(file)) {
@@ -1125,9 +1115,7 @@ public class EpgManager {
         int[] pixels = new int[width * height];
         result.getPixels(pixels, 0, width, 0, 0, width, height);
 
-        // ========== 1. 全局背景色估计（放宽条件） ==========
-        // 统计整张图中出现频率最高的“浅色簇”，而非仅取边缘像素。
-        // 放宽条件：max>=180（原 200），spread<=60（原 40），能覆盖 JPG 压缩后偏灰的白色背景。
+        // ===== 1. 全局背景色估计：统计浅色簇 =====
         HashMap<Integer, Integer> lightClusters = new HashMap<>();
         for (int i = 0; i < pixels.length; i++) {
             int c = pixels[i];
@@ -1141,9 +1129,8 @@ public class EpgManager {
                 lightClusters.put(key, lightClusters.containsKey(key) ? lightClusters.get(key) + 1 : 1);
             }
         }
-        // 取最频繁的 8 种浅色簇作为背景色
         ArrayList<Integer> bgSamples = new ArrayList<>();
-        if (lightClusters.size() >= 3) {
+        if (!lightClusters.isEmpty()) {
             ArrayList<Integer> sortedKeys = new ArrayList<>(lightClusters.keySet());
             Collections.sort(sortedKeys, (a, b) -> Integer.compare(lightClusters.get(b), lightClusters.get(a)));
             int n = Math.min(8, sortedKeys.size());
@@ -1155,59 +1142,24 @@ public class EpgManager {
                 bgSamples.add(Color.rgb(r, g, b));
             }
         }
-        if (bgSamples.isEmpty()) {
-            // 回退：从四边采样
-            int sx = Math.max(1, width / 32), sy = Math.max(1, height / 32);
-            for (int x = 0; x < width; x += sx) {
-                addBackgroundSample(bgSamples, pixels, width, height, x, 0);
-                addBackgroundSample(bgSamples, pixels, width, height, x, height - 1);
-            }
-            for (int y = 0; y < height; y += sy) {
-                addBackgroundSample(bgSamples, pixels, width, height, 0, y);
-                addBackgroundSample(bgSamples, pixels, width, height, width - 1, y);
-            }
-        }
-        if (bgSamples.isEmpty()) bgSamples.add(Color.WHITE);
+        // 无条件把纯白也加入参考背景色，保证任何白底图都有"锚点"
+        bgSamples.add(Color.WHITE);
         int nBg = bgSamples.size();
         int[] br = new int[nBg], bg = new int[nBg], bb = new int[nBg];
         for (int i = 0; i < nBg; i++) {
             int c = bgSamples.get(i);
-            br[i] = Color.red(c);
-            bg[i] = Color.green(c);
-            bb[i] = Color.blue(c);
+            br[i] = Color.red(c); bg[i] = Color.green(c); bb[i] = Color.blue(c);
         }
 
-        // ========== 2. 边缘连通区域标记（放宽多级阈值） ==========
-        boolean[] transparent = new boolean[pixels.length];
-        java.util.ArrayDeque<Integer> queue = new java.util.ArrayDeque<>();
+        // ===== 2. 逐像素判定 =====
+        final int fullTransDist2 = 25 * 25;   // <=25：完全透明
+        final int gradEndDist2   = 75 * 75;   // 25~75：线性渐变；>75：走浅中性色兜底
+        int transparent = 0;
 
-        // 四条边全部作为种子
-        for (int x = 0; x < width; x++) {
-            int top = x;
-            if (!transparent[top]) { transparent[top] = true; queue.add(top); }
-            if (height > 1) {
-                int bottom = (height - 1) * width + x;
-                if (!transparent[bottom]) { transparent[bottom] = true; queue.add(bottom); }
-            }
-        }
-        for (int y = 1; y < height - 1; y++) {
-            int left = y * width;
-            if (!transparent[left]) { transparent[left] = true; queue.add(left); }
-            if (width > 1) {
-                int right = y * width + width - 1;
-                if (!transparent[right]) { transparent[right] = true; queue.add(right); }
-            }
-        }
-
-        // 放宽的多级阈值：120/85/55（原 85/55/35），能穿透更严重的 JPG 色偏
-        final int[] thresholds2 = {120 * 120, 85 * 85, 55 * 55};
-
-        while (!queue.isEmpty()) {
-            int idx = queue.removeFirst();
-            int c = pixels[idx];
-            if (Color.alpha(c) == 0) continue;
+        for (int i = 0; i < pixels.length; i++) {
+            int c = pixels[i];
+            if (Color.alpha(c) == 0) { transparent++; continue; }
             int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
-
             int minDist2 = Integer.MAX_VALUE;
             for (int j = 0; j < nBg; j++) {
                 int dr = r - br[j], dg = g - bg[j], db = b - bb[j];
@@ -1215,70 +1167,31 @@ public class EpgManager {
                 if (d2 < minDist2) minDist2 = d2;
             }
 
-            boolean isBg = false;
-            if (minDist2 <= thresholds2[0]) {
+            if (minDist2 <= fullTransDist2) {
+                pixels[i] = Color.argb(0, r, g, b);
+                transparent++;
+            } else if (minDist2 <= gradEndDist2) {
+                double d = Math.sqrt(minDist2);
+                int alpha = (int) (255.0 * (d - 25.0) / 50.0);
+                alpha = Math.max(0, Math.min(255, alpha));
+                pixels[i] = Color.argb(alpha, r, g, b);
+                if (alpha < 255) transparent++;
+            } else {
+                // 兜底：JPG 压缩白底经常在 200–240 之间飘，且接近中性色。
+                // 只要像素"足够浅且足够中性"，就把它当作背景彻底透明化。
                 int max = Math.max(r, Math.max(g, b));
                 int min = Math.min(r, Math.min(g, b));
                 int spread = max - min;
-                if (minDist2 <= thresholds2[2]) {
-                    isBg = true; // 非常接近背景色
-                } else if (minDist2 <= thresholds2[1]) {
-                    isBg = true; // 比较接近
-                } else {
-                    // 最宽松一级：只要偏亮或偏中性就认为是背景（阈值放宽到 160/70）
-                    if (max >= 160 && spread <= 70) isBg = true;
-                }
-            }
-
-            if (!isBg) {
-                transparent[idx] = false;
-                continue;
-            }
-
-            int x = idx % width, y = idx / width;
-            if (x > 0 && !transparent[idx - 1]) { transparent[idx - 1] = true; queue.add(idx - 1); }
-            if (x + 1 < width && !transparent[idx + 1]) { transparent[idx + 1] = true; queue.add(idx + 1); }
-            if (y > 0 && !transparent[idx - width]) { transparent[idx - width] = true; queue.add(idx - width); }
-            if (y + 1 < height && !transparent[idx + width]) { transparent[idx + width] = true; queue.add(idx + width); }
-        }
-
-        // ========== 3. 全图处理：透明化 + 更激进的抗锯齿 ==========
-        int removed = 0;
-        for (int i = 0; i < pixels.length; i++) {
-            int c = pixels[i];
-            if (Color.alpha(c) == 0) { transparent[i] = true; continue; }
-            int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
-
-            int minDist2 = Integer.MAX_VALUE;
-            for (int j = 0; j < nBg; j++) {
-                int dr = r - br[j], dg = g - bg[j], db = b - bb[j];
-                int d2 = dr * dr + dg * dg + db * db;
-                if (d2 < minDist2) minDist2 = d2;
-            }
-
-            if (transparent[i]) {
-                pixels[i] = Color.argb(0, r, g, b);
-                removed++;
-                continue;
-            }
-
-            // 抗锯齿边缘处理：条件放宽到 90*90 && spread<=80（原来 60*60/60），
-            // 把 JPG 边缘残留的浅灰过渡像素彻底消灭
-            int spread = Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b));
-            if (minDist2 <= 90 * 90 && spread <= 80) {
-                double d = Math.sqrt(minDist2);
-                int a = (int) (255.0 * (d - 25.0) / 65.0);
-                a = Math.max(0, Math.min(255, a));
-                if (a < 255) {
-                    pixels[i] = Color.argb(a, r, g, b);
-                    removed++;
+                if (max >= 200 && spread <= 30) {
+                    pixels[i] = Color.argb(0, r, g, b);
+                    transparent++;
                 }
             }
         }
 
         result.setPixels(pixels, 0, width, 0, 0, width, height);
-        FileLogger.write(TAG, "台标透明化完成(全局背景估计+多级阈值): " + width + "x" + height
-                + " bgColors=" + nBg + " transparent=" + removed);
+        FileLogger.write(TAG, "台标透明化完成V4(简单白底): " + width + "x" + height
+                + " bgColors=" + nBg + " transparent=" + transparent);
         return result;
     }
 
