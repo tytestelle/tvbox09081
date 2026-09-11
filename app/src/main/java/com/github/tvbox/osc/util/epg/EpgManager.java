@@ -63,14 +63,16 @@ import okhttp3.Response;
  *        （GitHub 仓库本身已是透明 PNG，原样保存，不再透明化）
  *   4) 全部失败 → 返回 null，调用方不显示台标
  *
- * EPG ID 解析策略：
- *   1) 优先查 assets/epg_data.json 的静态映射；
- *   2) 未命中时查运行期回填的动态映射 dynamic_epg_ids.json（等价于把
- *      “新条目”补进 epg_data.json，下次启动直接命中）；
- *   3) 仍未命中且频道名以“台”结尾时，把 “xx台”（原名称）与 “xx”（去掉
- *      “台”）作为候选 epgid，在 XMLTV 的 display-name 里做精确匹配；
- *   4) 命中则把 频道名→候选epgid 回填到 dynamic_epg_ids.json；未命中则
- *      视为 XML 中确实没有该频道，不做任何处理。
+ * EPG ID 解析策略（按优先级）：
+ *   1) assets/epg_data.json 的静态映射；
+ *   2) 运行期回填的动态映射 dynamic_epg_ids.json（等价于把新条目写进
+ *      epg_data.json，下次启动直接命中）；
+ *   3) 仍未命中时用“候选名”去 XMLTV 的 display-name 里做精确匹配，候选规则：
+ *        - 第一个候选：原始频道名称本身
+ *        - 若名称以“台”结尾且长度 > 1，追加第二个候选：去掉末尾“台”
+ *      任一个候选在 XMLTV 命中，就把 原始频道名 → 该候选 回填到
+ *      dynamic_epg_ids.json；
+ *   4) 全部未命中 → 视为 XMLTV 中确实没有该频道，不做处理。
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -199,10 +201,6 @@ public class EpgManager {
     }
 
     // ======================== 动态 EPG ID 映射 ========================
-    /**
-     * 加载运行期回填的映射（相当于“新增到 epg_data.json”的条目）。
-     * 静态映射始终优先于动态映射，保证 assets 里手动维护的值不会被覆盖。
-     */
     private void loadDynamicEpgIds() {
         synchronized (dynamicEpgIds) {
             dynamicEpgIds.clear();
@@ -253,17 +251,25 @@ public class EpgManager {
 
     /**
      * 从频道名推导候选 EPG ID。
-     * 规则：当名称以“台”结尾且长度 > 1 时，候选为 [xx台, xx]（xx 为去掉“台”）。
+     * 规则（按顺序）：
+     *   ① 原始频道名称本身；
+     *   ② 若名称以“台”结尾且长度 > 1，去掉末尾“台”。
+     *
      * 仅在 epg_data.json 与 dynamic_epg_ids.json 均未命中时使用。
      */
     private List<String> deriveEpgIdCandidates(String channelName) {
         List<String> candidates = new ArrayList<>();
         if (TextUtils.isEmpty(channelName)) return candidates;
         String name = channelName.trim();
+        if (name.isEmpty()) return candidates;
+
+        // ① 原始名称始终作为候选
+        candidates.add(name);
+
+        // ② 末尾带“台”时，去掉“台”作为第二个候选
         if (name.length() > 1 && name.endsWith("台")) {
             String without = name.substring(0, name.length() - 1).trim();
-            if (!without.isEmpty()) {
-                candidates.add(name);
+            if (!without.isEmpty() && !without.equals(name)) {
                 candidates.add(without);
             }
         }
@@ -644,8 +650,8 @@ public class EpgManager {
         }
 
         final Set<String> requested = new HashSet<>();
-        // 记录“推导候选 -> 原始频道名”，解析成功后用于回填动态映射。
-        final Map<String, String> derivedToOriginal = new HashMap<>();
+        // 记录“候选 -> 一组原始频道名”，解析成功后用于回填动态映射。
+        final Map<String, Set<String>> derivedToOriginal = new HashMap<>();
 
         for (String name : channelNames) {
             if (TextUtils.isEmpty(name)) continue;
@@ -659,9 +665,12 @@ public class EpgManager {
             if (!candidates.isEmpty()) {
                 for (String cand : candidates) {
                     requested.add(cand);
-                    if (!derivedToOriginal.containsKey(cand)) {
-                        derivedToOriginal.put(cand, name);
+                    Set<String> originals = derivedToOriginal.get(cand);
+                    if (originals == null) {
+                        originals = new HashSet<>();
+                        derivedToOriginal.put(cand, originals);
                     }
+                    originals.add(name);
                 }
                 FileLogger.write(TAG, "EPG候选推导: name=[" + name + "] 候选=" + candidates);
             }
@@ -673,7 +682,7 @@ public class EpgManager {
         }
 
         epgExecutor.execute(() -> {
-            // 待回填的动态映射：[原始频道名, 命中的候选epgid]
+            // 待回填的动态映射：一组 [原始频道名, 命中的候选epgid]
             final List<String[]> backfill = new ArrayList<>();
             try {
                 synchronized (parseLock) {
@@ -682,10 +691,12 @@ public class EpgManager {
                     }
                     // 不管是否重新解析，都基于当前索引判断候选是否命中。
                     // 只有真正命中 XMLTV display-name 的候选才会被回填。
-                    for (Map.Entry<String, String> e : derivedToOriginal.entrySet()) {
+                    for (Map.Entry<String, Set<String>> e : derivedToOriginal.entrySet()) {
                         String candidate = e.getKey();
                         if (xmlChannelIdsByEpgId.containsKey(candidate)) {
-                            backfill.add(new String[]{e.getValue(), candidate});
+                            for (String originalName : e.getValue()) {
+                                backfill.add(new String[]{originalName, candidate});
+                            }
                         }
                     }
                 }
@@ -776,10 +787,7 @@ public class EpgManager {
      *   1) 本地 logos/{epgid}.png 存在 → 直接返回
      *   2) EPG 中该 epgid 有 icon 地址 → 下载 → 透明化 → 保存
      *   3) GitHub 仓库 {GITHUB_LOGO_BASE_URL}{epgid}.png → 下载 → 原样保存
-     *      （GitHub 仓库本身已是透明 PNG，不再做透明化处理）
      *   4) 全部失败 → 回调 null，UI 不显示台标
-     *
-     * 回调一定会被调用一次，且始终在主线程。
      */
     public void loadProcessedChannelIcon(final String channelName, final IconCallback callback) {
         if (TextUtils.isEmpty(channelName)) {
@@ -794,13 +802,11 @@ public class EpgManager {
         }
         final File target = new File(logoDir, epgid + ".png");
 
-        // ① 本地已存在 → 直接返回，不再做任何处理
         if (target.exists() && target.length() > 0) {
             if (callback != null) mainHandler.post(() -> callback.onIcon(target));
             return;
         }
 
-        // 已有同 epgid 的下载在飞行中 → 轮询等待结果
         if (!iconInFlight.add(epgid)) {
             if (callback != null) {
                 final Runnable[] checker = new Runnable[1];
@@ -821,7 +827,6 @@ public class EpgManager {
         iconExecutor.execute(() -> {
             File result = null;
             try {
-                // ② 尝试 EPG 中的 icon 地址（需要透明化）
                 String epgIconUrl;
                 synchronized (parseLock) {
                     epgIconUrl = iconUrlByEpgId.get(epgid);
@@ -838,7 +843,6 @@ public class EpgManager {
                     FileLogger.write(TAG, "EPG 中无台标地址，直接尝试 GitHub: epgid=[" + epgid + "]");
                 }
 
-                // ③ 回退 GitHub（已是透明 PNG，原样保存）
                 if (result == null) {
                     String githubUrl = GITHUB_LOGO_BASE_URL + epgid + ".png";
                     FileLogger.write(TAG, "台标尝试来源=GitHub: epgid=[" + epgid + "] url=[" + githubUrl + "]");
@@ -863,10 +867,6 @@ public class EpgManager {
         });
     }
 
-    /**
-     * EPG 来源：下载图片 → 透明化 → 原子写入 target。
-     * 返回成功保存的文件，失败返回 null。
-     */
     private File downloadEpgIconAndSave(String epgid, String url, File target) {
         Bitmap bitmap = null;
         Bitmap transparent = null;
@@ -916,11 +916,6 @@ public class EpgManager {
         }
     }
 
-    /**
-     * GitHub 来源：下载原始 PNG 字节 → 原样原子写入 target。
-     * GitHub 仓库中的台标已经做过透明化，直接落盘即可。
-     * 返回成功保存的文件，失败返回 null。
-     */
     private File downloadGithubIconAndSave(String epgid, String url, File target) {
         File tmp = null;
         try {
@@ -936,7 +931,6 @@ public class EpgManager {
                     return null;
                 }
 
-                // 简单校验一下是有效图片（避免把 404 HTML 之类写进去）
                 Bitmap probe = BitmapFactory.decodeByteArray(data, 0, data.length);
                 if (probe == null) {
                     FileLogger.write(TAG, "GitHub 台标解码校验失败（可能不是图片）: " + url);
@@ -966,9 +960,6 @@ public class EpgManager {
         }
     }
 
-    /**
-     * 把临时文件原子地替换为 target（带 .bak 回滚）。
-     */
     private boolean installTmpFile(File tmp, File target) {
         try {
             File backup = new File(logoDir, target.getName() + ".bak");
@@ -1130,13 +1121,6 @@ public class EpgManager {
 
     // ======================== 台标透明化 ========================
 
-    /**
-     * V7：关键修复 —— 从零创建 ARGB_8888 Bitmap 并显式 setHasAlpha(true)。
-     * 之前 src.copy(...) 会继承 JPG 解码后 hasAlpha=false 标志，导致
-     * PNG 编码器不写 alpha 通道，透明像素被当作白色。
-     *
-     * 只在 EPG 来源使用；GitHub 来源的台标跳过此步骤。
-     */
     private Bitmap makeTransparent(Bitmap src) {
         if (src == null) return null;
         final int width = src.getWidth(), height = src.getHeight();
