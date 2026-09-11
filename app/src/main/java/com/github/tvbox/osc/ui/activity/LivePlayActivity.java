@@ -22,6 +22,7 @@ import android.os.CountDownTimer;
 import android.os.Handler;
 import android.text.TextUtils;
 import android.util.Base64;
+import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
@@ -41,7 +42,6 @@ import android.widget.RelativeLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.view.GestureDetector;
 
 import androidx.annotation.NonNull;
 import androidx.core.content.ContextCompat;
@@ -135,7 +135,6 @@ public class LivePlayActivity extends BaseActivity {
     public static Context context;
     private VideoView mVideoView;
 
-    // ========== 酷9手势与窗口 ==========
     private View gestureOverlay;
     private GestureDetector gestureDetector;
     private LinearLayout llBottomInfoBar;
@@ -147,6 +146,7 @@ public class LivePlayActivity extends BaseActivity {
     private boolean isBottomInfoBarShowing = false;
     private static final float GESTURE_EDGE_RATIO = 0.18f;
     private static final long BOTTOM_INFO_SHOW_DURATION = 5000L;
+
     private final Runnable mEpgProgressRun = new Runnable() {
         @Override public void run() {
             updateEpgProgress();
@@ -158,6 +158,7 @@ public class LivePlayActivity extends BaseActivity {
             hideBottomInfoBar();
         }
     };
+
     private View switchChannelSnapshotOverlay;
     private ImageView switchChannelSnapshotImage;
     private TextView tvChannelInfo;
@@ -172,7 +173,6 @@ public class LivePlayActivity extends BaseActivity {
     private LiveChannelGroupAdapter liveChannelGroupAdapter;
     private LiveChannelItemAdapter liveChannelItemAdapter;
 
-    // ========== 底部信息栏专用字段 ==========
     private TextView tvChannelNumBottom;
     private TextView tvChannelNameBottom;
     private ImageView imgLiveIconBottom;
@@ -181,7 +181,6 @@ public class LivePlayActivity extends BaseActivity {
     private LinearLayout llChannelTags;
     private int mCurrentVideoW = 0, mCurrentVideoH = 0;
 
-    // 酷9节目单独立窗口
     private View ku9ProgramGuide;
     private TvRecyclerView ku9GuideChannelList;
     private TvRecyclerView ku9GuideDateList;
@@ -195,9 +194,9 @@ public class LivePlayActivity extends BaseActivity {
     private TextView ku9GuideChannelGroupButton;
     private int ku9GuideChannelFocusPosition = -1;
 
-    // ========== 节目单日期轮询 ==========
     private int currentKu9DatePos = -1;
     private int lastLoadedKu9DateFocusedPos = -1;
+
     private final Runnable mKu9DateWatchRun = new Runnable() {
         @Override
         public void run() {
@@ -236,7 +235,6 @@ public class LivePlayActivity extends BaseActivity {
         }
     };
 
-    // 直播断线自动重连
     private static final int LIVE_RECONNECT_MAX_RETRIES = Integer.MAX_VALUE;
     private static final long LIVE_RECONNECT_BASE_DELAY = 1500L;
     private int liveReconnectAttempts = 0;
@@ -311,6 +309,7 @@ public class LivePlayActivity extends BaseActivity {
     private static final String DEFAULT_EPG_ADDRESS = "http://epg.51zmt.top:8000/api/diyp/?ch={name}&date={date}";
     private static final Pattern CATCHUP_TOKEN_PATTERN = Pattern.compile("(\\Q$\\E?\\Q{\\E[^}]*\\Q}\\E)");
     private static final Pattern CATCHUP_TAG_PATTERN = Pattern.compile("\\Q{\\E([^}]*)\\Q}\\E");
+
     private final Runnable mLoadEpgRun = new Runnable() {
         @Override
         public void run() {
@@ -402,6 +401,9 @@ public class LivePlayActivity extends BaseActivity {
 
     private JsonObject catchup = null;
     private String logoUrl = null;
+
+    // ★★★ 这个 epgdata 必须在类内部，之前是因为它在类外才导致编译失败
+    private List<Epginfo> epgdata = new ArrayList<>();
 
     @Override
     protected int getLayoutResID() {
@@ -606,8 +608,7 @@ public class LivePlayActivity extends BaseActivity {
             finish();
         }
     }
-
-    // ========================================================================
+        // ========================================================================
     // ========== 底部信息栏（纯代码创建，无 XML 依赖） ==========
     // ========================================================================
     private void setupBottomInfoBar() {
@@ -636,7 +637,6 @@ public class LivePlayActivity extends BaseActivity {
         llBottomInfoBar.setGravity(Gravity.CENTER_VERTICAL);
         llBottomInfoBar.setVisibility(View.GONE);
 
-        // 左侧大台标
         FrameLayout iconBox = new FrameLayout(this);
         iconBox.setLayoutParams(new LinearLayout.LayoutParams(dp(120), dp(120)));
         iconBox.setBackgroundColor(0x22FFFFFF);
@@ -664,7 +664,6 @@ public class LivePlayActivity extends BaseActivity {
 
         llBottomInfoBar.addView(iconBox);
 
-        // 右侧信息区
         LinearLayout infoBox = new LinearLayout(this);
         infoBox.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(
@@ -673,7 +672,6 @@ public class LivePlayActivity extends BaseActivity {
         infoBox.setLayoutParams(infoLp);
         llBottomInfoBar.addView(infoBox);
 
-        // 行1：频道号 + 频道名 + 标签
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
         row1.setGravity(Gravity.CENTER_VERTICAL);
@@ -704,7 +702,6 @@ public class LivePlayActivity extends BaseActivity {
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         row1.addView(llChannelTags);
 
-        // 行2：进度条 + 距结束
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
         row2.setGravity(Gravity.CENTER_VERTICAL);
@@ -731,7 +728,6 @@ public class LivePlayActivity extends BaseActivity {
         tvEpgRemaining.setSingleLine(true);
         row2.addView(tvEpgRemaining);
 
-        // 行3：正在播放
         LinearLayout row3 = new LinearLayout(this);
         row3.setOrientation(LinearLayout.HORIZONTAL);
         row3.setGravity(Gravity.CENTER_VERTICAL);
@@ -756,7 +752,6 @@ public class LivePlayActivity extends BaseActivity {
         tvCurrentProgramName.setEllipsize(android.text.TextUtils.TruncateAt.END);
         row3.addView(tvCurrentProgramName);
 
-        // 行4：描述
         tvDesc = new TextView(this);
         tvDesc.setTextColor(0x99FFFFFF);
         tvDesc.setTextSize(13);
@@ -769,7 +764,6 @@ public class LivePlayActivity extends BaseActivity {
         tvDesc.setLayoutParams(descLp);
         infoBox.addView(tvDesc);
 
-        // 行5：下一节目
         LinearLayout row5 = new LinearLayout(this);
         row5.setOrientation(LinearLayout.HORIZONTAL);
         row5.setGravity(Gravity.CENTER_VERTICAL);
@@ -813,9 +807,8 @@ public class LivePlayActivity extends BaseActivity {
 
         try {
             int fps = 0;
-            // if (mVideoView != null) fps = mVideoView.getVideoFps();
             if (fps > 0) addTag(fps + "FPS");
-        } catch (Throwable ignored) {}
+        } catch (Throwable ignored) { }
 
         addTag("立体声");
         addTag("IPV4");
@@ -998,6 +991,7 @@ public class LivePlayActivity extends BaseActivity {
             FileLogger.write("LivePlay", "safeInitSettingPanel error: " + e.getMessage());
         }
     }
+
     private void showEpg(Date date, ArrayList<Epginfo> arrayList) {
         boolean hasEpg = arrayList != null && arrayList.size() > 0;
         updateEpgPanelState(hasEpg);
@@ -1517,8 +1511,7 @@ public class LivePlayActivity extends BaseActivity {
         }
         return trimName;
     }
-
-    @SuppressLint("SetTextI18n")
+        @SuppressLint("SetTextI18n")
     private void showBottomEpg() {
         if (isSHIYI) return;
         if (channel_Name == null || channel_Name.getChannelName() == null) return;
@@ -1881,7 +1874,6 @@ public class LivePlayActivity extends BaseActivity {
                     hideKu9ProgramGuide();
                     return true;
                 }
-                // ===== 无论焦点在哪，UP/DOWN 都用来切日期 =====
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
                     if (ku9GuideDateAdapter != null && ku9GuideDateAdapter.getItemCount() > 0) {
                         if (currentKu9DatePos < 0) currentKu9DatePos = findTodayGuideDateIndex();
@@ -2794,9 +2786,6 @@ public class LivePlayActivity extends BaseActivity {
         });
     }
 
-    // ========================================================================
-    // ========== 酷9节目单 ==========
-    // ========================================================================
     private void initKu9ProgramGuide() {
         if (ku9GuideChannelList == null || ku9GuideDateList == null || ku9GuideProgramList == null) return;
         ku9GuideChannelList.setHasFixedSize(true);
@@ -5177,7 +5166,6 @@ public class LivePlayActivity extends BaseActivity {
 
     private interface OnInputConfirmListener { void onConfirm(String value); }
 
-    // ========== 酷9手势 ==========
     private void initGestureDetector() {
         if (gestureOverlay == null) return;
         gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
@@ -5363,4 +5351,3 @@ public class LivePlayActivity extends BaseActivity {
         if (tvEpgRemaining != null) tvEpgRemaining.setText("距结束：" + minutes + " 分钟");
     }
 }
-    private List<Epginfo> epgdata = new ArrayList<>();
