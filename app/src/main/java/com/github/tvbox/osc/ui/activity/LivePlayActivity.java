@@ -164,6 +164,9 @@ public class LivePlayActivity extends BaseActivity {
     private LinearLayout llChannelTags;
     private int mCurrentVideoW = 0, mCurrentVideoH = 0;
 
+    // ★ 新增：记录鼠标最近悬停过的分组下标，避免同一分组重复加载
+    private int mLastHoveredGroupIndex = -1;
+
     private View ku9ProgramGuide;
     private TvRecyclerView ku9GuideChannelList, ku9GuideDateList, ku9GuideProgramList;
     private Ku9GuideChannelAdapter ku9GuideChannelAdapter;
@@ -2916,13 +2919,37 @@ public class LivePlayActivity extends BaseActivity {
         mChannelGroupView.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
+                // ★ 遥控器/键盘焦点移动到分组：自动加载该分组台标 + EPG 节目预告到频道名称下
                 final int pos = position;
-                // ★ 修复：延后一帧
                 safeRecyclerAction(mChannelGroupView, () -> selectChannelGroup(pos, true, -1));
             }
             @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { if (isNeedInputPassword(position)) showPasswordDialog(position, -1); }
         });
         liveChannelGroupAdapter.setOnItemClickListener((adapter, view, position) -> { FastClickCheckUtil.check(view); selectChannelGroup(position, false, -1); });
+
+        // ★ 新增：鼠标悬停到分组时也自动加载该分组的台标 + EPG 节目预告到频道名称下
+        mChannelGroupView.setOnHoverListener((v, event) -> {
+            int action = event.getAction();
+            if (action == MotionEvent.ACTION_HOVER_ENTER || action == MotionEvent.ACTION_HOVER_MOVE) {
+                View child = mChannelGroupView.findChildViewUnder(event.getX(), event.getY());
+                if (child != null) {
+                    int pos = mChannelGroupView.getChildAdapterPosition(child);
+                    if (pos >= 0 && pos != mLastHoveredGroupIndex) {
+                        mLastHoveredGroupIndex = pos;
+                        if (liveChannelGroupList != null && pos < liveChannelGroupList.size() && !isNeedInputPassword(pos)) {
+                            mHandler.post(() -> {
+                                if (isFinishing()) return;
+                                if (liveChannelGroupAdapter != null) liveChannelGroupAdapter.setSelectedGroupIndex(pos);
+                                loadChannelGroupData(pos);
+                            });
+                        }
+                    }
+                }
+            } else if (action == MotionEvent.ACTION_HOVER_EXIT) {
+                mLastHoveredGroupIndex = -1;
+            }
+            return false;
+        });
     }
 
     private void selectChannelGroup(int groupIndex, boolean focus, int liveChannelIndex) {
@@ -4087,7 +4114,11 @@ public class LivePlayActivity extends BaseActivity {
         ArrayList<String> names = new ArrayList<>();
         for (LiveChannelItem item : channels) if (item != null && !TextUtils.isEmpty(item.getChannelName())) names.add(item.getChannelName());
         EpgManager.getInstance(this).preloadGroupResources(names, () -> {
-            if (liveChannelItemAdapter != null && groupIndex == currentChannelGroupIndex) liveChannelItemAdapter.notifyDataSetChanged();
+            if (liveChannelItemAdapter != null && groupIndex == currentChannelGroupIndex) {
+                liveChannelItemAdapter.notifyDataSetChanged();
+                // ★ 新增：EPG 资源预加载完成后再填充一次节目信息到频道名称下
+                loadGroupChannelsEpgPreview(groupIndex);
+            }
             if (ku9GuideChannelAdapter != null && ku9GuideShowing && groupIndex == currentChannelGroupIndex) {
                 ku9GuideChannelAdapter.notifyDataSetChanged();
                 int cp = Math.max(0, Math.min(ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex, ku9GuideChannelAdapter.getItemCount() - 1));
@@ -4110,6 +4141,8 @@ public class LivePlayActivity extends BaseActivity {
         List<LiveChannelItem> channels = getLiveChannels(groupIndex);
         if (liveChannelItemAdapter != null) liveChannelItemAdapter.setNewData(channels != null ? channels : new ArrayList<>());
         preloadCurrentGroupEpgResources(groupIndex);
+        // ★ 新增：点击/悬停分组时同步把 EPG 节目信息加载到频道名称下方
+        loadGroupChannelsEpgPreview(groupIndex);
         if (mLiveChannelView != null) {
             if (groupIndex == currentChannelGroupIndex && currentLiveChannelIndex > -1) {
                 mLiveChannelView.scrollToPosition(currentLiveChannelIndex);
@@ -4119,6 +4152,64 @@ public class LivePlayActivity extends BaseActivity {
                 if (liveChannelItemAdapter != null) liveChannelItemAdapter.setSelectedChannelIndex(-1);
             }
         }
+    }
+
+    /**
+     * ★ 新增：为指定分组下的所有频道批量加载 EPG 节目信息，显示在频道名称下方。
+     * 优先从 EpgManager 内存缓存读取；若为空，再回退到本地数据库缓存。
+     * 若 EPG 数据尚未就绪（异步下载中），预加载完成回调会再次触发本方法。
+     */
+    private void loadGroupChannelsEpgPreview(int groupIndex) {
+        if (liveChannelItemAdapter == null) return;
+        final List<LiveChannelItem> channels = getLiveChannels(groupIndex);
+        if (channels == null || channels.isEmpty()) return;
+
+        final Date today = new Date();
+        final SimpleDateFormat dayFmt = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault());
+        dayFmt.setTimeZone(TimeZone.getTimeZone("GMT+8:00"));
+        final String dateStr = dayFmt.format(today);
+
+        Executors.newSingleThreadExecutor().execute(() -> {
+            final ArrayList<String[]> previews = new ArrayList<>();
+            EpgManager manager = EpgManager.getInstance(LivePlayActivity.this);
+            for (LiveChannelItem item : channels) {
+                if (item == null || TextUtils.isEmpty(item.getChannelName())) continue;
+                final String channelName = item.getChannelName();
+                String title = null, desc = "";
+                // 1) 优先取 EpgManager 内存缓存（XML EPG / 已下载过的频道）
+                try {
+                    EpgManager.EpgProgram program = manager.getCurrentProgram(channelName);
+                    if (program == null) program = manager.getNextProgram(channelName);
+                    if (program != null) {
+                        title = formatEpgTime(program.start) + "-" + formatEpgTime(program.stop)
+                                + " " + (program.title == null ? "" : program.title);
+                        desc = program.description == null ? "" : program.description;
+                    }
+                } catch (Throwable ignored) { }
+                // 2) 回退到本地数据库缓存
+                if (TextUtils.isEmpty(title)) {
+                    try {
+                        ArrayList<Epginfo> list = EpgUtil.loadEpgData(channelName, dateStr, today);
+                        if (list != null && !list.isEmpty()) {
+                            int idx = findCurrentEpgIndex(list);
+                            if (idx < 0) idx = 0;
+                            Epginfo e = list.get(idx);
+                            if (e != null) {
+                                title = e.start + "-" + e.end + " " + (e.title == null ? "" : e.title);
+                                desc = e.desc == null ? "" : e.desc;
+                            }
+                        }
+                    } catch (Throwable ignored) { }
+                }
+                if (!TextUtils.isEmpty(title)) previews.add(new String[]{channelName, title, desc});
+            }
+            mHandler.post(() -> {
+                if (isFinishing() || liveChannelItemAdapter == null) return;
+                if (previews.isEmpty()) return;
+                for (String[] p : previews) liveChannelItemAdapter.setCurrentProgramPreview(p[0], p[1], p[2]);
+                liveChannelItemAdapter.notifyDataSetChanged();
+            });
+        });
     }
 
     private boolean isNeedInputPassword(int groupIndex) {
