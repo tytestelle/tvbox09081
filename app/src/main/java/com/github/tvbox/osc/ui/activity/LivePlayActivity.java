@@ -220,7 +220,6 @@ public class LivePlayActivity extends BaseActivity {
     private TextView tvCurrentSourceName;
     private String currentSourceName = "";
 
-    // ★ 新增：超时换源关闭常量
     private static final int LIVE_CONNECT_TIMEOUT_OFF = -1;
 
     private android.content.BroadcastReceiver liveRefreshReceiver = new android.content.BroadcastReceiver() {
@@ -748,6 +747,21 @@ public class LivePlayActivity extends BaseActivity {
         }
     }
 
+    /**
+     * ★ 新增：安全执行 RecyclerView 上的焦点/数据变更操作。
+     * RecyclerView 规定：不能在 onLayout / onMeasure / scroll 期间调用 notifyDataSetChanged，
+     * 否则会抛 IllegalStateException: Cannot call this method while RecyclerView is computing a layout or scrolling。
+     * 当目标 RV 忙时，把动作延后一帧执行。
+     */
+    private void safeRecyclerAction(final TvRecyclerView rv, final Runnable action) {
+        if (action == null) return;
+        if (rv == null) { action.run(); return; }
+        boolean busy = false;
+        try { busy = rv.isComputingLayout() || rv.isScrolling(); } catch (Throwable ignored) { }
+        if (busy) rv.postDelayed(action, 32L);
+        else action.run();
+    }
+
     private void initSourceListView() {
         if (mSourceListView == null) return;
         mSourceListView.setHasFixedSize(true);
@@ -755,9 +769,18 @@ public class LivePlayActivity extends BaseActivity {
         liveSourceAdapter = new LiveSourceAdapter();
         mSourceListView.setAdapter(liveSourceAdapter);
         mSourceListView.setOnItemListener(new TvRecyclerView.OnItemListener() {
-            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { liveSourceAdapter.setFocusedPosition(-1); }
+            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
+                // ★ 修复：延后一帧，避免在 layout/scroll 中触发 notifyDataSetChanged
+                safeRecyclerAction(mSourceListView, () -> {
+                    if (liveSourceAdapter != null) liveSourceAdapter.setFocusedPosition(-1);
+                });
+            }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
-                liveSourceAdapter.setFocusedPosition(position);
+                final int pos = position;
+                // ★ 修复：延后一帧
+                safeRecyclerAction(mSourceListView, () -> {
+                    if (liveSourceAdapter != null) liveSourceAdapter.setFocusedPosition(pos);
+                });
                 mHandler.removeCallbacks(mHideChannelListRun);
                 mHandler.postDelayed(mHideChannelListRun, postTimeout);
             }
@@ -2017,7 +2040,6 @@ public class LivePlayActivity extends BaseActivity {
         if (tvCurrentSourceName != null) { tvCurrentSourceName.setText(sourceName); tvCurrentSourceName.setVisibility(View.VISIBLE); }
     }
 
-    // ★ 新增：超时换源是否已关闭
     private boolean isSwitchOnTimeoutDisabled() {
         return Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1) == LIVE_CONNECT_TIMEOUT_OFF;
     }
@@ -2149,7 +2171,6 @@ public class LivePlayActivity extends BaseActivity {
         if (tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.INVISIBLE) {
             ApiConfig.get().refreshLiveApiHistoryItems();
             loadCurrentSourceList();
-            // ★ 每次显示设置面板前，重新构建菜单列表，保证菜单项完整
             initLiveSettingGroupList();
             if (liveSettingGroupAdapter != null) {
                 liveSettingGroupAdapter.setNewData(getVisibleLiveSettingGroupList());
@@ -2248,8 +2269,20 @@ public class LivePlayActivity extends BaseActivity {
         ku9GuideChannelAdapter = new Ku9GuideChannelAdapter();
         ku9GuideChannelList.setAdapter(ku9GuideChannelAdapter);
         ku9GuideChannelList.setOnItemListener(new TvRecyclerView.OnItemListener() {
-            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { ku9GuideChannelAdapter.setFocusedIndex(-1); }
-            @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) { ku9GuideChannelFocusPosition = position; ku9GuideChannelAdapter.setFocusedIndex(position); }
+            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
+                // ★ 修复：延后一帧
+                safeRecyclerAction(ku9GuideChannelList, () -> {
+                    if (ku9GuideChannelAdapter != null) ku9GuideChannelAdapter.setFocusedIndex(-1);
+                });
+            }
+            @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
+                ku9GuideChannelFocusPosition = position;
+                final int pos = position;
+                // ★ 修复：延后一帧
+                safeRecyclerAction(ku9GuideChannelList, () -> {
+                    if (ku9GuideChannelAdapter != null) ku9GuideChannelAdapter.setFocusedIndex(pos);
+                });
+            }
             @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { selectKu9GuideChannel(position); }
         });
         ku9GuideChannelAdapter.setOnItemClickListener((adapter, view, position) -> selectKu9GuideChannel(position));
@@ -2259,13 +2292,27 @@ public class LivePlayActivity extends BaseActivity {
         ku9GuideDateAdapter = new Ku9GuideDateAdapter();
         ku9GuideDateList.setAdapter(ku9GuideDateAdapter);
         ku9GuideDateList.setOnItemListener(new TvRecyclerView.OnItemListener() {
-            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { ku9GuideDateAdapter.setFocusedIndex(-1); }
+            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
+                // ★ 修复：延后一帧
+                safeRecyclerAction(ku9GuideDateList, () -> {
+                    if (ku9GuideDateAdapter != null) ku9GuideDateAdapter.setFocusedIndex(-1);
+                });
+            }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
-                ku9GuideDateAdapter.setFocusedIndex(position);
-                if (position >= 0 && position < ku9GuideDateAdapter.getItemCount()) { ku9GuideDateAdapter.setSelectedIndex(position); currentKu9DatePos = position; }
-                if (ku9GuideShowing && position >= 0 && position < ku9GuideDateAdapter.getItemCount()) {
+                final int pos = position;
+                // ★ 修复：延后一帧
+                safeRecyclerAction(ku9GuideDateList, () -> {
+                    if (ku9GuideDateAdapter == null) return;
+                    ku9GuideDateAdapter.setFocusedIndex(pos);
+                    if (pos >= 0 && pos < ku9GuideDateAdapter.getItemCount()) {
+                        ku9GuideDateAdapter.setSelectedIndex(pos);
+                        currentKu9DatePos = pos;
+                    }
+                });
+                if (ku9GuideShowing && position >= 0 && ku9GuideDateAdapter != null
+                        && position < ku9GuideDateAdapter.getItemCount()) {
                     LiveEpgDate d = ku9GuideDateAdapter.getItem(position);
-                    if (d != null) {
+                    if (d != null && ku9GuideChannelAdapter != null) {
                         int cp = Math.max(0, Math.min(
                                 ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
                                 Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
@@ -2297,8 +2344,19 @@ public class LivePlayActivity extends BaseActivity {
         ku9GuideProgramAdapter = new Ku9GuideProgramAdapter();
         ku9GuideProgramList.setAdapter(ku9GuideProgramAdapter);
         ku9GuideProgramList.setOnItemListener(new TvRecyclerView.OnItemListener() {
-            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { ku9GuideProgramAdapter.setFocusedIndex(-1); }
-            @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) { ku9GuideProgramAdapter.setFocusedIndex(position); }
+            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
+                // ★ 修复：延后一帧
+                safeRecyclerAction(ku9GuideProgramList, () -> {
+                    if (ku9GuideProgramAdapter != null) ku9GuideProgramAdapter.setFocusedIndex(-1);
+                });
+            }
+            @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
+                final int pos = position;
+                // ★ 修复：延后一帧
+                safeRecyclerAction(ku9GuideProgramList, () -> {
+                    if (ku9GuideProgramAdapter != null) ku9GuideProgramAdapter.setFocusedIndex(pos);
+                });
+            }
             @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { clickEpgItem(position); }
         });
         ku9GuideProgramAdapter.setOnItemClickListener((adapter, view, position) -> clickEpgItem(position));
@@ -2659,11 +2717,20 @@ public class LivePlayActivity extends BaseActivity {
             }
         });
         mRightEpgList.setOnItemListener(new TvRecyclerView.OnItemListener() {
-            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { if (epgListAdapter != null) epgListAdapter.setFocusedEpgIndex(-1); }
+            @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
+                // ★ 修复：延后一帧
+                safeRecyclerAction(mRightEpgList, () -> {
+                    if (epgListAdapter != null) epgListAdapter.setFocusedEpgIndex(-1);
+                });
+            }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
+                final int pos = position;
+                // ★ 修复：延后一帧
+                safeRecyclerAction(mRightEpgList, () -> {
+                    if (epgListAdapter != null) epgListAdapter.setFocusedEpgIndex(pos);
+                });
                 mHandler.removeCallbacks(mHideChannelListRun);
                 mHandler.postDelayed(mHideChannelListRun, postTimeout);
-                if (epgListAdapter != null) epgListAdapter.setFocusedEpgIndex(position);
             }
             @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { clickEpgItem(position); }
         });
@@ -2755,7 +2822,6 @@ public class LivePlayActivity extends BaseActivity {
         mEpgDateGridView.setVisibility(View.GONE);
     }
 
-    // ★ 修改：超时换源关闭时不再触发换源/换台
     private void initVideoView() {
         LiveController controller = new LiveController(this);
         controller.setListener(new LiveController.LiveControlListener() {
@@ -2782,14 +2848,12 @@ public class LivePlayActivity extends BaseActivity {
                     case VideoView.STATE_ERROR:
                     case VideoView.STATE_PLAYBACK_COMPLETED:
                         hideSwitchChannelSnapshot();
-                        // ★ 关闭超时换源时，不触发换源，由 mLiveReconnectRun 无限重连同源
                         if (!isSwitchOnTimeoutDisabled()) {
                             mHandler.postDelayed(mConnectTimeoutChangeSourceRun, 3500);
                         }
                         break;
                     case VideoView.STATE_PREPARING:
                     case VideoView.STATE_BUFFERING:
-                        // ★ 关闭超时换源时，不触发换源，由 mLiveReconnectRun 无限重连同源
                         if (!isSwitchOnTimeoutDisabled()) {
                             mHandler.postDelayed(mConnectTimeoutChangeSourceRun, (Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1) + 1) * 5000L);
                         }
@@ -2823,7 +2887,6 @@ public class LivePlayActivity extends BaseActivity {
         return true;
     }
 
-    // ★ 修改：加守卫，关闭超时换源后绝不触发换源/换台
     private Runnable mConnectTimeoutChangeSourceRun = new Runnable() {
         @Override public void run() {
             if (isSwitchOnTimeoutDisabled()) return;
@@ -2852,7 +2915,11 @@ public class LivePlayActivity extends BaseActivity {
         });
         mChannelGroupView.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { }
-            @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) { selectChannelGroup(position, true, -1); }
+            @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
+                final int pos = position;
+                // ★ 修复：延后一帧
+                safeRecyclerAction(mChannelGroupView, () -> selectChannelGroup(pos, true, -1));
+            }
             @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { if (isNeedInputPassword(position)) showPasswordDialog(position, -1); }
         });
         liveChannelGroupAdapter.setOnItemClickListener((adapter, view, position) -> { FastClickCheckUtil.check(view); selectChannelGroup(position, false, -1); });
@@ -2901,8 +2968,12 @@ public class LivePlayActivity extends BaseActivity {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 if (position < 0) return;
-                if (liveChannelGroupAdapter != null) liveChannelGroupAdapter.setFocusedGroupIndex(-1);
-                if (liveChannelItemAdapter != null) liveChannelItemAdapter.setFocusedChannelIndex(position);
+                final int pos = position;
+                // ★ 修复：延后一帧
+                safeRecyclerAction(mLiveChannelView, () -> {
+                    if (liveChannelGroupAdapter != null) liveChannelGroupAdapter.setFocusedGroupIndex(-1);
+                    if (liveChannelItemAdapter != null) liveChannelItemAdapter.setFocusedChannelIndex(pos);
+                });
             }
             @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { clickLiveChannel(position); }
         });
@@ -2937,7 +3008,11 @@ public class LivePlayActivity extends BaseActivity {
         });
         mSettingGroupView.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { }
-            @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) { selectVisibleSettingGroup(position, true); }
+            @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
+                final int pos = position;
+                // ★ 修复：延后一帧
+                safeRecyclerAction(mSettingGroupView, () -> selectVisibleSettingGroup(pos, true));
+            }
             @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { }
         });
         liveSettingGroupAdapter.setOnItemClickListener((adapter, view, position) -> { FastClickCheckUtil.check(view); selectVisibleSettingGroup(position, false); });
@@ -3014,8 +3089,12 @@ public class LivePlayActivity extends BaseActivity {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 if (position < 0) return;
-                if (liveSettingGroupAdapter != null) liveSettingGroupAdapter.setFocusedGroupIndex(-1);
-                if (liveSettingItemAdapter != null) liveSettingItemAdapter.setFocusedItemIndex(position);
+                final int pos = position;
+                // ★ 修复：延后一帧
+                safeRecyclerAction(mSettingItemView, () -> {
+                    if (liveSettingGroupAdapter != null) liveSettingGroupAdapter.setFocusedGroupIndex(-1);
+                    if (liveSettingItemAdapter != null) liveSettingItemAdapter.setFocusedItemIndex(pos);
+                });
                 mHandler.removeCallbacks(mHideSettingLayoutRun);
                 mHandler.postDelayed(mHideSettingLayoutRun, postTimeout);
             }
@@ -3024,7 +3103,6 @@ public class LivePlayActivity extends BaseActivity {
         liveSettingItemAdapter.setOnItemClickListener((adapter, view, position) -> { FastClickCheckUtil.check(view); clickSettingItem(position); });
     }
 
-    // ★ 修改：case 3 支持「关闭」选项
     private void clickSettingItem(int position) {
         int realGroupIndex = liveSettingGroupAdapter != null ? liveSettingGroupAdapter.getSelectedGroupIndex() : -1;
         if (realGroupIndex >= 0 && realGroupIndex < 3 && !isCurrentLiveChannelValid()) return;
@@ -3051,7 +3129,6 @@ public class LivePlayActivity extends BaseActivity {
                         && position < liveSettingItemAdapter.getData().size()) {
                     LiveSettingItem clickedItem = liveSettingItemAdapter.getData().get(position);
                     if (clickedItem != null && "关闭".equals(clickedItem.getItemName())) {
-                        // ★ 关闭超时换源，取消已挂起的换源任务，交给断线重连同源恢复
                         Hawk.put(HawkConfig.LIVE_CONNECT_TIMEOUT, LIVE_CONNECT_TIMEOUT_OFF);
                         mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
                     } else {
@@ -3178,7 +3255,6 @@ public class LivePlayActivity extends BaseActivity {
         mHandler.postDelayed(mHideSettingLayoutRun, postTimeout);
     }
 
-    // ==================== 列表订阅 UI（匹配目标截图） ====================
     private void showSourceManageDialog() {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setCancelable(true);
@@ -3192,7 +3268,6 @@ public class LivePlayActivity extends BaseActivity {
         mainLayout.setBackground(bg);
         mainLayout.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // ===== 左侧：二维码 + 提示 =====
         LinearLayout leftPanel = new LinearLayout(this);
         leftPanel.setOrientation(LinearLayout.VERTICAL);
         leftPanel.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
@@ -3224,7 +3299,6 @@ public class LivePlayActivity extends BaseActivity {
         Bitmap qrBitmap = QRCodeUtil.createQRCode(content, qrSize);
         if (qrBitmap != null) qrImage.setImageBitmap(qrBitmap);
 
-        // ===== 右侧：列表 + 输入 + 按钮 =====
         LinearLayout rightPanel = new LinearLayout(this);
         rightPanel.setOrientation(LinearLayout.VERTICAL);
         rightPanel.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.9f));
@@ -3763,17 +3837,14 @@ public class LivePlayActivity extends BaseActivity {
                 && currentLiveChannelItem.getSourceIndex() < currentLiveChannelItem.getChannelUrls().size();
     }
 
-    // ★ 菜单默认索引固定为 0（线路选择）
     private int getDefaultSettingGroupIndex() { return 0; }
 
-    // ★ 返回全部菜单，不过滤任何功能
     private ArrayList<LiveSettingGroup> getVisibleLiveSettingGroupList() {
         ArrayList<LiveSettingGroup> visibleGroups = new ArrayList<>();
         if (liveSettingGroupList != null) visibleGroups.addAll(liveSettingGroupList);
         return visibleGroups;
     }
 
-    // ★ 修改：超时换源组追加「关闭」选项
     private void initLiveSettingGroupList() {
         List<LiveSettingGroup> base = ApiConfig.get().getLiveSettingGroupList();
         liveSettingGroupList = new ArrayList<>();
@@ -3786,7 +3857,6 @@ public class LivePlayActivity extends BaseActivity {
 
         LiveSettingGroup timeoutGroup = findSettingGroupByIndex(3);
         if (timeoutGroup != null && timeoutGroup.getLiveSettingItems() != null) {
-            // ★ 追加「关闭」选项（幂等，避免重复添加）
             boolean hasOffOption = false;
             for (LiveSettingItem item : timeoutGroup.getLiveSettingItems()) {
                 if (item != null && "关闭".equals(item.getItemName())) { hasOffOption = true; break; }
@@ -3798,7 +3868,6 @@ public class LivePlayActivity extends BaseActivity {
                 timeoutGroup.getLiveSettingItems().add(offItem);
             }
 
-            // ★ 回显选中状态（-1 代表关闭）
             for (LiveSettingItem item : timeoutGroup.getLiveSettingItems()) {
                 if (item != null) item.setItemSelected(false);
             }
@@ -3824,7 +3893,6 @@ public class LivePlayActivity extends BaseActivity {
         if (lineGroup != null && lineGroup.getLiveSettingItems() != null && liveGroupIndex >= 0 && liveGroupIndex < lineGroup.getLiveSettingItems().size())
             lineGroup.getLiveSettingItems().get(liveGroupIndex).setItemSelected(true);
 
-        // ===== 固定扩展菜单（任何时刻都存在）=====
         LiveSettingGroup sourceGroup = new LiveSettingGroup();
         sourceGroup.setGroupIndex(7);
         sourceGroup.setGroupName("直播订阅");
