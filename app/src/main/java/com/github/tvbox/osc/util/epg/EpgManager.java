@@ -57,8 +57,9 @@ import okhttp3.Response;
  *
  * 台标加载策略（顺序回退）：
  *   1) 本地 logos/{epgid}.png 存在 → 直接返回
- *   2) EPG 文件里该 epgid 有 icon 地址 → 下载 / 透明化 / 保存为 {epgid}.png
- *   3) EPG 没有或下载失败 → 到 GitHub 仓库下载 {epgid}.png → 透明化 / 保存
+ *   2) EPG 文件里该 epgid 有 icon 地址 → 下载 → 透明化 → 保存为 {epgid}.png
+ *   3) EPG 没有或下载失败 → 到 GitHub 仓库下载 {epgid}.png
+ *        （GitHub 仓库本身已是透明 PNG，原样保存，不再透明化）
  *   4) 全部失败 → 返回 null，调用方不显示台标
  */
 public class EpgManager {
@@ -104,7 +105,7 @@ public class EpgManager {
     private final Map<String, String> iconUrlByEpgId = new HashMap<>();
     private final Set<String> loadedEpgIds = new HashSet<>();
 
-    // 保留旧的偏好设置键，兼容调用方，但新的加载链路不再依赖它。
+    // 保留旧的偏好设置键，兼容外部调用，但新的加载链路不再依赖它。
     private static final String LOGO_PREFS = "logo_settings";
     private static final String LOGO_SOURCE_KEY = "xmltv_logo_source";
     public static final String LOGO_SOURCE_EPG = "EPG";
@@ -563,8 +564,6 @@ public class EpgManager {
                         parseXmlForEpgIds(epgFile, requested);
                     }
                 }
-
-                // 解析完成后不需要主动预下载台标：UI 会通过 loadProcessedChannelIcon 按需加载。
             } catch (Exception e) {
                 FileLogger.write(TAG, "当前频道组 EPG 懒加载失败", e);
             } finally {
@@ -631,8 +630,9 @@ public class EpgManager {
     /**
      * 按顺序加载台标：
      *   1) 本地 logos/{epgid}.png 存在 → 直接返回
-     *   2) EPG 中该 epgid 有 icon 地址 → 下载 / 透明化 / 保存
-     *   3) GitHub 仓库 {GITHUB_LOGO_BASE_URL}{epgid}.png → 下载 / 透明化 / 保存
+     *   2) EPG 中该 epgid 有 icon 地址 → 下载 → 透明化 → 保存
+     *   3) GitHub 仓库 {GITHUB_LOGO_BASE_URL}{epgid}.png → 下载 → 原样保存
+     *      （GitHub 仓库本身已是透明 PNG，不再做透明化处理）
      *   4) 全部失败 → 回调 null，UI 不显示台标
      *
      * 回调一定会被调用一次，且始终在主线程。
@@ -677,14 +677,14 @@ public class EpgManager {
         iconExecutor.execute(() -> {
             File result = null;
             try {
-                // ② 尝试 EPG 中的 icon 地址
+                // ② 尝试 EPG 中的 icon 地址（需要透明化）
                 String epgIconUrl;
                 synchronized (parseLock) {
                     epgIconUrl = iconUrlByEpgId.get(epgid);
                 }
                 if (!TextUtils.isEmpty(epgIconUrl)) {
                     FileLogger.write(TAG, "台标尝试来源=EPG: epgid=[" + epgid + "] url=[" + epgIconUrl + "]");
-                    result = downloadAndSaveProcessedIcon(epgid, epgIconUrl, target);
+                    result = downloadEpgIconAndSave(epgid, epgIconUrl, target);
                     if (result != null) {
                         FileLogger.write(TAG, "台标来源命中=EPG: epgid=[" + epgid + "] -> " + target.getAbsolutePath());
                     } else {
@@ -694,11 +694,11 @@ public class EpgManager {
                     FileLogger.write(TAG, "EPG 中无台标地址，直接尝试 GitHub: epgid=[" + epgid + "]");
                 }
 
-                // ③ 回退 GitHub
+                // ③ 回退 GitHub（已是透明 PNG，原样保存）
                 if (result == null) {
                     String githubUrl = GITHUB_LOGO_BASE_URL + epgid + ".png";
                     FileLogger.write(TAG, "台标尝试来源=GitHub: epgid=[" + epgid + "] url=[" + githubUrl + "]");
-                    result = downloadAndSaveProcessedIcon(epgid, githubUrl, target);
+                    result = downloadGithubIconAndSave(epgid, githubUrl, target);
                     if (result != null) {
                         FileLogger.write(TAG, "台标来源命中=GitHub: epgid=[" + epgid + "] -> " + target.getAbsolutePath());
                     }
@@ -720,9 +720,10 @@ public class EpgManager {
     }
 
     /**
-     * 从 url 下载图片 → 透明化 → 原子写入 target。返回成功保存的文件，失败返回 null。
+     * EPG 来源：下载图片 → 透明化 → 原子写入 target。
+     * 返回成功保存的文件，失败返回 null。
      */
-    private File downloadAndSaveProcessedIcon(String epgid, String url, File target) {
+    private File downloadEpgIconAndSave(String epgid, String url, File target) {
         Bitmap bitmap = null;
         Bitmap transparent = null;
         File tmp = null;
@@ -730,18 +731,18 @@ public class EpgManager {
             Request request = new Request.Builder().url(url).get().build();
             try (Response response = httpClient.newCall(request).execute()) {
                 if (!response.isSuccessful() || response.body() == null) {
-                    FileLogger.write(TAG, "台标下载失败 HTTP " + response.code() + ": " + url);
+                    FileLogger.write(TAG, "EPG 台标下载失败 HTTP " + response.code() + ": " + url);
                     return null;
                 }
                 byte[] data = response.body().bytes();
                 bitmap = BitmapFactory.decodeByteArray(data, 0, data.length);
                 if (bitmap == null) {
-                    FileLogger.write(TAG, "台标解码失败: " + url);
+                    FileLogger.write(TAG, "EPG 台标解码失败: " + url);
                     return null;
                 }
                 transparent = makeTransparent(bitmap);
                 if (transparent == null) {
-                    FileLogger.write(TAG, "台标透明化失败: " + url);
+                    FileLogger.write(TAG, "EPG 台标透明化失败: " + url);
                     return null;
                 }
 
@@ -759,29 +760,93 @@ public class EpgManager {
                 }
                 if (!tmp.exists() || tmp.length() <= 0) throw new java.io.IOException("临时 PNG 未生成");
 
-                File backup = new File(logoDir, target.getName() + ".bak");
-                if (backup.exists()) backup.delete();
-                boolean movedOld = target.exists() && target.renameTo(backup);
-                boolean installed = tmp.renameTo(target);
-                if (!installed) {
-                    copyFile(tmp, target);
-                    installed = target.exists() && target.length() > 0;
-                }
-                if (!installed) {
-                    if (movedOld && !target.exists()) backup.renameTo(target);
-                    throw new java.io.IOException("透明 PNG 替换失败");
-                }
-                if (backup.exists()) backup.delete();
-                if (tmp.exists()) tmp.delete();
-                return target.exists() && target.length() > 0 ? target : null;
+                return installTmpFile(tmp, target) ? target : null;
             }
         } catch (Exception e) {
-            FileLogger.write(TAG, "台标下载/处理异常: epgid=[" + epgid + "] url=[" + url + "]", e);
+            FileLogger.write(TAG, "EPG 台标下载/处理异常: epgid=[" + epgid + "] url=[" + url + "]", e);
             if (tmp != null && tmp.exists()) tmp.delete();
             return null;
         } finally {
             if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
             if (transparent != null && !transparent.isRecycled()) transparent.recycle();
+        }
+    }
+
+    /**
+     * GitHub 来源：下载原始 PNG 字节 → 原样原子写入 target。
+     * GitHub 仓库中的台标已经做过透明化，直接落盘即可。
+     * 返回成功保存的文件，失败返回 null。
+     */
+    private File downloadGithubIconAndSave(String epgid, String url, File target) {
+        File tmp = null;
+        try {
+            Request request = new Request.Builder().url(url).get().build();
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    FileLogger.write(TAG, "GitHub 台标下载失败 HTTP " + response.code() + ": " + url);
+                    return null;
+                }
+                byte[] data = response.body().bytes();
+                if (data == null || data.length == 0) {
+                    FileLogger.write(TAG, "GitHub 台标数据为空: " + url);
+                    return null;
+                }
+
+                // 简单校验一下是有效图片（避免把 404 HTML 之类写进去）
+                Bitmap probe = BitmapFactory.decodeByteArray(data, 0, data.length);
+                if (probe == null) {
+                    FileLogger.write(TAG, "GitHub 台标解码校验失败（可能不是图片）: " + url);
+                    return null;
+                }
+                probe.recycle();
+
+                if (!logoDir.exists() && !logoDir.mkdirs() && !logoDir.isDirectory()) {
+                    FileLogger.write(TAG, "无法创建台标目录: " + logoDir.getAbsolutePath());
+                    return null;
+                }
+                tmp = File.createTempFile("logo_gh_", ".png", logoDir);
+                try (FileOutputStream out = new FileOutputStream(tmp, false)) {
+                    out.write(data);
+                    out.flush();
+                    try { out.getFD().sync(); } catch (Exception ignored) { }
+                }
+                if (!tmp.exists() || tmp.length() <= 0) throw new java.io.IOException("临时 PNG 未生成");
+
+                FileLogger.write(TAG, "GitHub 台标已下载（跳过透明化）: epgid=[" + epgid + "] size=" + data.length);
+                return installTmpFile(tmp, target) ? target : null;
+            }
+        } catch (Exception e) {
+            FileLogger.write(TAG, "GitHub 台标下载异常: epgid=[" + epgid + "] url=[" + url + "]", e);
+            if (tmp != null && tmp.exists()) tmp.delete();
+            return null;
+        }
+    }
+
+    /**
+     * 把临时文件原子地替换为 target（带 .bak 回滚）。
+     */
+    private boolean installTmpFile(File tmp, File target) {
+        try {
+            File backup = new File(logoDir, target.getName() + ".bak");
+            if (backup.exists()) backup.delete();
+            boolean movedOld = target.exists() && target.renameTo(backup);
+            boolean installed = tmp.renameTo(target);
+            if (!installed) {
+                copyFile(tmp, target);
+                installed = target.exists() && target.length() > 0;
+            }
+            if (!installed) {
+                if (movedOld && !target.exists()) backup.renameTo(target);
+                FileLogger.write(TAG, "台标安装失败: " + target.getAbsolutePath());
+                return false;
+            }
+            if (backup.exists()) backup.delete();
+            if (tmp.exists()) tmp.delete();
+            return true;
+        } catch (Exception e) {
+            FileLogger.write(TAG, "台标安装异常: " + target.getAbsolutePath(), e);
+            if (tmp != null && tmp.exists()) tmp.delete();
+            return false;
         }
     }
 
@@ -925,6 +990,8 @@ public class EpgManager {
      * V7：关键修复 —— 从零创建 ARGB_8888 Bitmap 并显式 setHasAlpha(true)。
      * 之前 src.copy(...) 会继承 JPG 解码后 hasAlpha=false 标志，导致
      * PNG 编码器不写 alpha 通道，透明像素被当作白色。
+     *
+     * 只在 EPG 来源使用；GitHub 来源的台标跳过此步骤。
      */
     private Bitmap makeTransparent(Bitmap src) {
         if (src == null) return null;
