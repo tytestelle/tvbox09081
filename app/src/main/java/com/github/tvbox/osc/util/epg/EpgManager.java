@@ -1091,15 +1091,14 @@ public class EpgManager {
     }
 
     /**
-     * 台标背景透明化（V2）。
+     * 台标背景透明化（V3）。
      *
      * 针对 JPG 有损压缩白底残留问题做了如下改进：
-     * 1. 全局背景色估计：不再只用四边采样，而是统计整张图中出现频率最高的“浅色簇”，
-     *    避免边缘像素本身被 JPG 污染时采错背景色。
-     * 2. 多级背景判定：边缘连通时使用宽松阈值（穿透 JPG 色偏），配合“浅色/中性灰”
-     *    辅助判定，避免过度侵蚀前景。
-     * 3. 增强抗锯齿：对非背景但接近背景色的浅灰过渡像素赋予部分透明度，让边缘平滑
-     *    融入，消除一圈白色残留。
+     * 1. 全局背景色估计：放宽浅色簇统计条件（max>=180, spread<=60），最多取 8 种背景色，
+     *    彻底覆盖 JPEG 压缩产生的各种深浅不一的米白/浅灰。
+     * 2. 多级背景判定阈值放宽到 120/85/55（原来 85/55/35），最后一档辅助条件放宽到
+     *    max>=160, spread<=70，能穿透更严重的 JPEG 色偏。
+     * 3. 抗锯齿阶段扩大到 90*90 && spread<=80，把边缘残留的浅灰过渡像素全部消灭。
      */
     private String readSmallText(File file) {
         if (file == null || !file.isFile()) return "";
@@ -1126,9 +1125,9 @@ public class EpgManager {
         int[] pixels = new int[width * height];
         result.getPixels(pixels, 0, width, 0, 0, width, height);
 
-        // ========== 1. 全局背景色估计 ==========
+        // ========== 1. 全局背景色估计（放宽条件） ==========
         // 统计整张图中出现频率最高的“浅色簇”，而非仅取边缘像素。
-        // 这样即使边缘像素被 JPG 压缩污染，也能找到真正的背景色。
+        // 放宽条件：max>=180（原 200），spread<=60（原 40），能覆盖 JPG 压缩后偏灰的白色背景。
         HashMap<Integer, Integer> lightClusters = new HashMap<>();
         for (int i = 0; i < pixels.length; i++) {
             int c = pixels[i];
@@ -1136,19 +1135,18 @@ public class EpgManager {
             int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
             int max = Math.max(r, Math.max(g, b));
             int min = Math.min(r, Math.min(g, b));
-            // 只统计“接近白色”的像素（亮度高且接近中性灰）
-            if (max >= 200 && (max - min) <= 40) {
+            if (max >= 180 && (max - min) <= 60) {
                 int rr = r >> 3, gg = g >> 3, bb = b >> 3;
                 int key = (rr << 10) | (gg << 5) | bb;
                 lightClusters.put(key, lightClusters.containsKey(key) ? lightClusters.get(key) + 1 : 1);
             }
         }
-        // 如果图中没有足够的浅色像素，回退到边缘采样
+        // 取最频繁的 8 种浅色簇作为背景色
         ArrayList<Integer> bgSamples = new ArrayList<>();
         if (lightClusters.size() >= 3) {
             ArrayList<Integer> sortedKeys = new ArrayList<>(lightClusters.keySet());
             Collections.sort(sortedKeys, (a, b) -> Integer.compare(lightClusters.get(b), lightClusters.get(a)));
-            int n = Math.min(6, sortedKeys.size());
+            int n = Math.min(8, sortedKeys.size());
             for (int i = 0; i < n; i++) {
                 int k = sortedKeys.get(i);
                 int r = Math.min(255, ((k >> 10) & 31) * 8 + 4);
@@ -1156,7 +1154,8 @@ public class EpgManager {
                 int b = Math.min(255, (k & 31) * 8 + 4);
                 bgSamples.add(Color.rgb(r, g, b));
             }
-        } else {
+        }
+        if (bgSamples.isEmpty()) {
             // 回退：从四边采样
             int sx = Math.max(1, width / 32), sy = Math.max(1, height / 32);
             for (int x = 0; x < width; x += sx) {
@@ -1178,7 +1177,7 @@ public class EpgManager {
             bb[i] = Color.blue(c);
         }
 
-        // ========== 2. 边缘连通区域标记（带多级阈值） ==========
+        // ========== 2. 边缘连通区域标记（放宽多级阈值） ==========
         boolean[] transparent = new boolean[pixels.length];
         java.util.ArrayDeque<Integer> queue = new java.util.ArrayDeque<>();
 
@@ -1200,9 +1199,8 @@ public class EpgManager {
             }
         }
 
-        // 多级阈值：第一级宽松（85），第二级收紧（55），第三级严格（35）
-        // 这样既能穿透 JPG 色偏，又不会过度侵蚀前景
-        final int[] thresholds2 = {85 * 85, 55 * 55, 35 * 35};
+        // 放宽的多级阈值：120/85/55（原 85/55/35），能穿透更严重的 JPG 色偏
+        final int[] thresholds2 = {120 * 120, 85 * 85, 55 * 55};
 
         while (!queue.isEmpty()) {
             int idx = queue.removeFirst();
@@ -1217,7 +1215,6 @@ public class EpgManager {
                 if (d2 < minDist2) minDist2 = d2;
             }
 
-            // 多级判定：距离小于宽松阈值 → 认为是背景
             boolean isBg = false;
             if (minDist2 <= thresholds2[0]) {
                 int max = Math.max(r, Math.max(g, b));
@@ -1228,8 +1225,8 @@ public class EpgManager {
                 } else if (minDist2 <= thresholds2[1]) {
                     isBg = true; // 比较接近
                 } else {
-                    // 宽松阈值内，但要求是浅色或接近中性
-                    if (max >= 180 && spread <= 50) isBg = true;
+                    // 最宽松一级：只要偏亮或偏中性就认为是背景（阈值放宽到 160/70）
+                    if (max >= 160 && spread <= 70) isBg = true;
                 }
             }
 
@@ -1245,7 +1242,7 @@ public class EpgManager {
             if (y + 1 < height && !transparent[idx + width]) { transparent[idx + width] = true; queue.add(idx + width); }
         }
 
-        // ========== 3. 全图处理：透明化 + 抗锯齿边缘 ==========
+        // ========== 3. 全图处理：透明化 + 更激进的抗锯齿 ==========
         int removed = 0;
         for (int i = 0; i < pixels.length; i++) {
             int c = pixels[i];
@@ -1265,14 +1262,12 @@ public class EpgManager {
                 continue;
             }
 
-            // 抗锯齿边缘处理：对非背景但接近背景色的像素赋予部分透明度
-            // 使用更宽松的条件，覆盖 JPG 产生的浅灰过渡像素
+            // 抗锯齿边缘处理：条件放宽到 90*90 && spread<=80（原来 60*60/60），
+            // 把 JPG 边缘残留的浅灰过渡像素彻底消灭
             int spread = Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b));
-            if (minDist2 <= 60 * 60 && spread <= 60) {
-                // 计算部分透明度：距离背景越近越透明
+            if (minDist2 <= 90 * 90 && spread <= 80) {
                 double d = Math.sqrt(minDist2);
-                // alpha 从 0（距离 0）到 255（距离 60）
-                int a = (int) (255.0 * (d - 15.0) / 45.0);
+                int a = (int) (255.0 * (d - 25.0) / 65.0);
                 a = Math.max(0, Math.min(255, a));
                 if (a < 255) {
                     pixels[i] = Color.argb(a, r, g, b);
