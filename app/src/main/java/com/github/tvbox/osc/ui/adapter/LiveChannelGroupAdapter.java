@@ -26,12 +26,15 @@ public class LiveChannelGroupAdapter extends BaseQuickAdapter<LiveChannelGroup, 
 
         // 选中状态优先级最高
         if (groupIndex == selectedGroupIndex) {
-            tvGroupName.setTextColor(mContext.getResources().getColor(R.color.color_1890FF));
+            // ★ 修改点1：将原来的蓝色文字改为高亮金黄色，彻底解决蓝底蓝字看不见的问题
+            tvGroupName.setTextColor(Color.parseColor("#FFFFD54F")); 
             tvGroupName.setBackgroundResource(R.drawable.bg_live_group_selected);
         } else if (groupIndex == focusedGroupIndex) {
+            // ★ 修改点2：确保焦点状态是白字，防止焦点背景也是浅色
             tvGroupName.setTextColor(Color.WHITE);
             tvGroupName.setBackgroundResource(R.drawable.bg_live_group_focused);
         } else {
+            // 未选中状态：白字，透明背景
             tvGroupName.setTextColor(Color.WHITE);
             tvGroupName.setBackgroundResource(android.R.color.transparent);
         }
