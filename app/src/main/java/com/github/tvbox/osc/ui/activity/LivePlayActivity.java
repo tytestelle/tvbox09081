@@ -14,6 +14,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
@@ -26,6 +27,7 @@ import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -189,6 +191,47 @@ public class LivePlayActivity extends BaseActivity {
     private Ku9GuideProgramAdapter ku9GuideProgramAdapter;
     private boolean ku9GuideShowing = false;
     private boolean ku9GuideEpgLoadRequested = false;
+
+    // 酷9日期栏轮询（绕过 TvRecyclerView 焦点机制）
+    private int lastLoadedKu9DateFocusedPos = -1;
+    private int lastLoadedKu9DateSelectedPos = -1;
+    private final Runnable mKu9DateWatchRun = new Runnable() {
+        @Override
+        public void run() {
+            if (!ku9GuideShowing) return;
+            if (ku9GuideDateAdapter != null && ku9GuideDateAdapter.getItemCount() > 0) {
+                // 优先取焦点子项位置；取不到时退回 selectedPosition
+                int pos = -1;
+                View focused = ku9GuideDateList == null ? null : ku9GuideDateList.getFocusedChild();
+                if (focused != null && ku9GuideDateList != null) {
+                    pos = ku9GuideDateList.getChildAdapterPosition(focused);
+                }
+                if (pos < 0) {
+                    pos = ku9GuideDateList == null ? -1 : ku9GuideDateList.getSelectedPosition();
+                }
+                if (pos < 0 && ku9GuideDateAdapter != null) {
+                    pos = ku9GuideDateAdapter.getSelectedIndex();
+                }
+                if (pos >= 0 && pos < ku9GuideDateAdapter.getItemCount()) {
+                    if (pos != lastLoadedKu9DateFocusedPos) {
+                        lastLoadedKu9DateFocusedPos = pos;
+                        ku9GuideDateAdapter.setSelectedIndex(pos);
+                        LiveEpgDate d = ku9GuideDateAdapter.getItem(pos);
+                        if (d != null) {
+                            int cp = Math.max(0, Math.min(
+                                    ku9GuideChannelFocusPosition >= 0 ? ku9GuideChannelFocusPosition : currentLiveChannelIndex,
+                                    Math.max(0, ku9GuideChannelAdapter.getItemCount() - 1)));
+                            String dateStr = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+                                    .format(d.getDateParamVal());
+                            FileLogger.write("LivePlay", "轮询检测日期变化: pos=" + pos + " date=[" + dateStr + "]");
+                            loadKu9GuidePrograms(cp, d.getDateParamVal());
+                        }
+                    }
+                }
+            }
+            mHandler.postDelayed(this, 300);
+        }
+    };
 
     // 直播断线自动重连：仅针对当前频道实例，换台/换源会使旧重连任务失效。
     private static final int LIVE_RECONNECT_MAX_RETRIES = Integer.MAX_VALUE;
@@ -1403,34 +1446,50 @@ public class LivePlayActivity extends BaseActivity {
         final String channelName = channel_Name.getChannelName();
         final String channelNameReal = normalizeEpgChannelName(getFirstPartBeforeSpace(channelName));
         mHandler.post(() -> {
-            String epgTagName = channelNameReal;
-            String iconUrl = null;
             final EpgManager epgManager = EpgManager.getInstance(this);
             if (isXmlEpgAddress(epgStringAddress)) {
+                // XMLTV：直接读处理后的 PNG 文件，绕过 Glide 缓存
                 epgManager.loadProcessedChannelIcon(channelName, file -> {
-                    if (file != null && file.exists() && channel_Name != null && channelName.equals(channel_Name.getChannelName()) && imgLiveIcon != null) {
+                    if (file == null || !file.exists()) return;
+                    if (channel_Name == null || !channelName.equals(channel_Name.getChannelName())) return;
+                    if (imgLiveIcon == null) return;
+                    // 显式清除 ImageView 自身背景，以及它所有父 View 的背景，
+                    // 确保透明 PNG 不会被白色父容器“染白”。
+                    try {
+                        imgLiveIcon.setBackground(null);
+                        imgLiveIcon.setBackgroundColor(0x00000000);
+                        ViewParent vp = imgLiveIcon.getParent();
+                        while (vp instanceof View) {
+                            View parent = (View) vp;
+                            parent.setBackgroundColor(0x00000000);
+                            vp = parent.getParent();
+                        }
+                    } catch (Throwable ignored) { }
+                    Bitmap bmp = null;
+                    try {
+                        bmp = BitmapFactory.decodeFile(file.getAbsolutePath());
+                    } catch (Throwable ignored) { }
+                    if (bmp != null) {
+                        imgLiveIcon.setImageBitmap(bmp);
                         imgLiveIcon.setVisibility(View.VISIBLE);
-                        if (liveIconNullBg != null) liveIconNullBg.setVisibility(View.INVISIBLE);
-                        if (liveIconNullText != null) liveIconNullText.setVisibility(View.INVISIBLE);
-                        com.bumptech.glide.Glide.with(LivePlayActivity.this)
-                                .load(file)
-                                .diskCacheStrategy(com.bumptech.glide.load.engine.DiskCacheStrategy.NONE)
-                                .skipMemoryCache(true)
-                                .dontAnimate()
-                                .into(imgLiveIcon);
+                    } else {
+                        imgLiveIcon.setImageDrawable(null);
                     }
+                    if (liveIconNullBg != null) liveIconNullBg.setVisibility(View.INVISIBLE);
+                    if (liveIconNullText != null) liveIconNullText.setVisibility(View.INVISIBLE);
                 });
                 return;
             }
+            // 非 XMLTV 情况保留原有逻辑
+            String epgTagName = channelNameReal;
+            String iconUrl = null;
             if (channel_Name.getChannelLogo() != null && !channel_Name.getChannelLogo().isEmpty()) {
                 iconUrl = channel_Name.getChannelLogo();
             } else if (logoUrl == null || logoUrl.isEmpty()) {
                 String[] epgInfo = EpgUtil.getEpgInfo(channelNameReal);
                 if (epgInfo != null) {
                     iconUrl = epgInfo[0];
-                    if (epgInfo.length > 1 && !epgInfo[1].isEmpty()) {
-                        epgTagName = epgInfo[1];
-                    }
+                    if (epgInfo.length > 1 && !epgInfo[1].isEmpty()) epgTagName = epgInfo[1];
                 }
                 if (TextUtils.isEmpty(iconUrl)) {
                     try { iconUrl = EpgManager.getInstance(this).getChannelIconUrl(channelName); } catch (Exception ignored) { }
@@ -1844,6 +1903,7 @@ public class LivePlayActivity extends BaseActivity {
         }
         Hawk.put(HawkConfig.PLAYER_IS_LIVE, false);
         hideSwitchChannelSnapshot();
+        mHandler.removeCallbacks(mKu9DateWatchRun);
         mHandler.removeCallbacks(mLoadEpgRun);
         mHandler.removeCallbacks(mUpdateResolutionInfoRun);
         mHandler.removeCallbacks(mHideResolutionInfoRun);
@@ -2734,6 +2794,13 @@ public class LivePlayActivity extends BaseActivity {
             ku9GuideChannelGroupButton.setVisibility(View.VISIBLE);
             ku9GuideChannelGroupButton.bringToFront();
         }
+
+        // ===== 启动轮询：绕过 TvRecyclerView 的 onItemSelected =====
+        lastLoadedKu9DateFocusedPos = -1;
+        lastLoadedKu9DateSelectedPos = -1;
+        mHandler.removeCallbacks(mKu9DateWatchRun);
+        mHandler.postDelayed(mKu9DateWatchRun, 300);
+
         ku9GuideDateList.requestFocus();
     }
 
@@ -2901,6 +2968,7 @@ public class LivePlayActivity extends BaseActivity {
 
     private void hideKu9ProgramGuide() {
         ku9GuideShowing = false;
+        mHandler.removeCallbacks(mKu9DateWatchRun);
         if (ku9ProgramGuide != null) ku9ProgramGuide.setVisibility(View.GONE);
         if (tvLeftChannelListLayout != null) tvLeftChannelListLayout.setVisibility(View.INVISIBLE);
     }
