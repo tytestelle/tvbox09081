@@ -3340,20 +3340,91 @@ public class LivePlayActivity extends BaseActivity {
 
     /**
      * ★ 新增：显示位置选择对话框（不显示 / 左上 / 右上 / 左下 / 右下）
+     * 使用自定义黑透明风格，与"直播订阅"对话框保持一致。
      */
     private void showDisplayPositionDialog(String title, boolean currentEnabled, int currentPos,
                                            DisplayPositionCallback callback) {
         final String[] options = {"不显示", "左上角", "右上角", "左下角", "右下角"};
         int checked = currentEnabled ? Math.max(0, Math.min(currentPos + 1, options.length - 1)) : 0;
-        new AlertDialog.Builder(this)
-                .setTitle(title)
-                .setSingleChoiceItems(options, checked, (dialog, which) -> {
-                    dialog.dismiss();
-                    if (which == 0) callback.onResult(false, 0);
-                    else callback.onResult(true, which - 1);
-                })
-                .setNegativeButton("取消", null)
-                .show();
+
+        final android.app.Dialog dialog = new android.app.Dialog(this);
+
+        // 外层容器：黑透明 + 圆角
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(dp(24), dp(20), dp(24), dp(16));
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xE6000000);
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(1), 0x33FFFFFF);
+        container.setBackground(bg);
+
+        // 标题
+        TextView titleView = new TextView(this);
+        titleView.setText(title);
+        titleView.setTextColor(0xFF00E5D0);
+        titleView.setTextSize(16);
+        titleView.setGravity(Gravity.CENTER);
+        titleView.setPadding(0, 0, 0, dp(14));
+        container.addView(titleView);
+
+        // 选项按钮
+        for (int i = 0; i < options.length; i++) {
+            final int index = i;
+            boolean selected = (i == checked);
+
+            TextView option = new TextView(this);
+            option.setText(options[i]);
+            option.setTextSize(15);
+            option.setGravity(Gravity.CENTER);
+            option.setTextColor(selected ? 0xFF00E5D0 : 0xFFCCCCCC);
+
+            android.graphics.drawable.GradientDrawable itemBg = new android.graphics.drawable.GradientDrawable();
+            itemBg.setColor(selected ? 0x3300E5D0 : 0x33FFFFFF);
+            itemBg.setCornerRadius(dp(8));
+            itemBg.setStroke(dp(1), selected ? 0x6600E5D0 : 0x22FFFFFF);
+            option.setBackground(itemBg);
+
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(46));
+            lp.bottomMargin = dp(8);
+            option.setLayoutParams(lp);
+
+            option.setOnClickListener(v -> {
+                dialog.dismiss();
+                if (index == 0) callback.onResult(false, 0);
+                else callback.onResult(true, index - 1);
+            });
+            container.addView(option);
+        }
+
+        // 取消按钮
+        TextView cancel = new TextView(this);
+        cancel.setText("取消");
+        cancel.setTextSize(14);
+        cancel.setGravity(Gravity.CENTER);
+        cancel.setTextColor(0xFFAAAAAA);
+        android.graphics.drawable.GradientDrawable cancelBg = new android.graphics.drawable.GradientDrawable();
+        cancelBg.setColor(0x33FFFFFF);
+        cancelBg.setCornerRadius(dp(8));
+        cancel.setBackground(cancelBg);
+        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(42));
+        cancelLp.topMargin = dp(4);
+        cancel.setLayoutParams(cancelLp);
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        container.addView(cancel);
+
+        dialog.setContentView(container);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            android.view.WindowManager.LayoutParams wlp = dialog.getWindow().getAttributes();
+            int maxW = (int) (getResources().getDisplayMetrics().widthPixels * 0.62f);
+            wlp.width = maxW;
+            wlp.height = android.view.WindowManager.LayoutParams.WRAP_CONTENT;
+            dialog.getWindow().setAttributes(wlp);
+        }
+        dialog.show();
     }
 
     private interface DisplayPositionCallback {
