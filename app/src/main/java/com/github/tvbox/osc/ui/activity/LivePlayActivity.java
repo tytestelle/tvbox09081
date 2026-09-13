@@ -345,6 +345,9 @@ public class LivePlayActivity extends BaseActivity {
     private String logoUrl = null;
     private List<Epginfo> epgdata = new ArrayList<>();
 
+    // ★ 新增：启动时强制刷新一次直播配置，确保每次进入 APP 都联网更新订阅内容
+    private boolean forceRefreshLiveConfig = true;
+
     @Override
     protected int getLayoutResID() { return R.layout.activity_live_play; }
 
@@ -3865,6 +3868,12 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private void initLiveChannelList() {
+        // ★ 修改：启动时强制联网刷新一次，确保每次进入 APP 都从网络更新订阅内容
+        if (forceRefreshLiveConfig) {
+            forceRefreshLiveConfig = false;
+            loadLiveConfigOnEnter();
+            return;
+        }
         if (ApiConfig.get().shouldReloadLiveConfig()) { loadLiveConfigOnEnter(); return; }
         List<LiveChannelGroup> list = ApiConfig.get().getChannelGroupList();
         if (list == null || list.isEmpty()) { loadLiveConfigOnEnter(); return; }
@@ -3889,7 +3898,20 @@ public class LivePlayActivity extends BaseActivity {
                     safeInitSettingPanel();
                 });
             }
-            @Override public void error(String msg) { mHandler.post(() -> { loadingLiveConfigOnEnter = false; setEmptyLiveChannelList(); }); }
+            @Override public void error(String msg) {
+                mHandler.post(() -> {
+                    loadingLiveConfigOnEnter = false;
+                    // ★ 修改：网络刷新失败时，回退到已有缓存，避免频道列表被清空
+                    List<LiveChannelGroup> cached = ApiConfig.get().getChannelGroupList();
+                    if (cached != null && !cached.isEmpty()) {
+                        applyLiveChannelGroups(new ArrayList<>(cached));
+                        Toast.makeText(LivePlayActivity.this, "网络更新失败，已使用本地缓存: " + msg, Toast.LENGTH_SHORT).show();
+                    } else {
+                        setEmptyLiveChannelList();
+                        Toast.makeText(LivePlayActivity.this, "加载失败: " + msg, Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
             @Override public void notice(String msg) { mHandler.post(() -> Toast.makeText(LivePlayActivity.this, msg, Toast.LENGTH_SHORT).show()); }
         });
     }
