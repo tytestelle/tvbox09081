@@ -345,7 +345,7 @@ public class LivePlayActivity extends BaseActivity {
     private String logoUrl = null;
     private List<Epginfo> epgdata = new ArrayList<>();
 
-    // ★ 新增：启动时强制刷新一次直播配置，确保每次进入 APP 都联网更新订阅内容
+    // ★ 新增：启动时强制刷新一次直播配置（仅在冷启动的第一次初始化时触发）
     private boolean forceRefreshLiveConfig = true;
 
     @Override
@@ -3885,34 +3885,122 @@ public class LivePlayActivity extends BaseActivity {
 
     private boolean loadingLiveConfigOnEnter = false;
 
+    /**
+     * ★ 修改：启动时强制联网刷新直播订阅。
+     * 对普通 HTTP 订阅直接发起网络请求，完全绕过 ApiConfig 的缓存判断；
+     * 对代理/脚本类型（127.0.0.1、.py、.js）仍走 ApiConfig.loadLiveConfig(true, ...)。
+     */
     private void loadLiveConfigOnEnter() {
         if (loadingLiveConfigOnEnter) return;
         loadingLiveConfigOnEnter = true;
         showLoading();
-        ApiConfig.get().loadLiveConfig(true, new ApiConfig.LoadConfigCallback() {
-            @Override public void success() {
+
+        final String liveApiUrl = Hawk.get(HawkConfig.LIVE_API_URL, "");
+        if (TextUtils.isEmpty(liveApiUrl)) {
+            mHandler.post(() -> {
+                loadingLiveConfigOnEnter = false;
+                setEmptyLiveChannelList();
+            });
+            return;
+        }
+
+        // 代理 / 脚本类型（127.0.0.1、.py、.js）只能交给 ApiConfig 处理
+        if (liveApiUrl.startsWith("http://127.0.0.1")
+                || liveApiUrl.contains(".py")
+                || liveApiUrl.contains(".js")) {
+            ApiConfig.get().loadLiveConfig(true, new ApiConfig.LoadConfigCallback() {
+                @Override public void success() {
+                    mHandler.post(() -> {
+                        loadingLiveConfigOnEnter = false;
+                        applyLiveConfigAfterRefresh();
+                    });
+                }
+                @Override public void error(String msg) {
+                    mHandler.post(() -> {
+                        loadingLiveConfigOnEnter = false;
+                        fallbackToCache(msg);
+                    });
+                }
+                @Override public void notice(String msg) { }
+            });
+            return;
+        }
+
+        // 普通 HTTP 订阅：绕过 ApiConfig 缓存，直接联网拉取最新内容
+        OkGo.<String>get(liveApiUrl).execute(new AbsCallback<String>() {
+            @Override public String convertResponse(okhttp3.Response response) throws Throwable {
+                return response.body() != null ? response.body().string() : "";
+            }
+
+            @Override public void onSuccess(Response<String> response) {
+                if (response == null || response.body() == null || response.body().trim().isEmpty()) {
+                    mHandler.post(() -> { loadingLiveConfigOnEnter = false; fallbackToCache("网络响应为空"); });
+                    return;
+                }
+                final String body = response.body();
+                JsonArray livesArray = TxtSubscribe.parseToJsonArray(body);
+                ApiConfig.get().loadLives(livesArray);
+                List<LiveChannelGroup> list = ApiConfig.get().getChannelGroupList();
+                if (list == null || list.isEmpty()) {
+                    mHandler.post(() -> { loadingLiveConfigOnEnter = false; fallbackToCache("解析后频道列表为空"); });
+                    return;
+                }
+                final ArrayList<LiveChannelGroup> loadedGroups = new ArrayList<>(list);
                 mHandler.post(() -> {
                     loadingLiveConfigOnEnter = false;
-                    initLiveChannelList();
+                    applyLiveChannelGroups(loadedGroups);
                     initLiveSettingGroupList();
                     safeInitSettingPanel();
                 });
             }
-            @Override public void error(String msg) {
+
+            @Override public void onError(Response<String> response) {
+                String err = (response != null && response.getException() != null)
+                        ? response.getException().getMessage() : "未知";
+                mHandler.post(() -> { loadingLiveConfigOnEnter = false; fallbackToCache("网络请求失败: " + err); });
+            }
+        });
+    }
+
+    /** ★ 新增：刷新成功后直接应用最新频道列表，不再走 shouldReloadLiveConfig 判断 */
+    private void applyLiveConfigAfterRefresh() {
+        List<LiveChannelGroup> list = ApiConfig.get().getChannelGroupList();
+        if (list == null || list.isEmpty()) {
+            fallbackToCache("刷新后列表为空");
+            return;
+        }
+        initLiveObj();
+        if (list.size() == 1 && list.get(0) != null && list.get(0).getGroupName() != null
+                && list.get(0).getGroupName().startsWith("http://127.0.0.1"))
+            loadProxyLives(list.get(0).getGroupName());
+        else
+            applyLiveChannelGroups(new ArrayList<>(list));
+        initLiveSettingGroupList();
+        safeInitSettingPanel();
+    }
+
+    /** ★ 新增：网络刷新失败时回退：先尝试 ApiConfig 内部缓存，再判断是否彻底为空 */
+    private void fallbackToCache(String reason) {
+        ApiConfig.get().loadLiveConfig(false, new ApiConfig.LoadConfigCallback() {
+            @Override public void success() {
                 mHandler.post(() -> {
-                    loadingLiveConfigOnEnter = false;
-                    // ★ 修改：网络刷新失败时，回退到已有缓存，避免频道列表被清空
                     List<LiveChannelGroup> cached = ApiConfig.get().getChannelGroupList();
                     if (cached != null && !cached.isEmpty()) {
-                        applyLiveChannelGroups(new ArrayList<>(cached));
-                        Toast.makeText(LivePlayActivity.this, "网络更新失败，已使用本地缓存: " + msg, Toast.LENGTH_SHORT).show();
+                        applyLiveConfigAfterRefresh();
+                        Toast.makeText(LivePlayActivity.this, "网络更新失败，已使用本地缓存", Toast.LENGTH_SHORT).show();
                     } else {
                         setEmptyLiveChannelList();
-                        Toast.makeText(LivePlayActivity.this, "加载失败: " + msg, Toast.LENGTH_SHORT).show();
+                        Toast.makeText(LivePlayActivity.this, "加载失败: " + reason, Toast.LENGTH_SHORT).show();
                     }
                 });
             }
-            @Override public void notice(String msg) { mHandler.post(() -> Toast.makeText(LivePlayActivity.this, msg, Toast.LENGTH_SHORT).show()); }
+            @Override public void error(String msg) {
+                mHandler.post(() -> {
+                    setEmptyLiveChannelList();
+                    Toast.makeText(LivePlayActivity.this, "加载失败: " + reason, Toast.LENGTH_SHORT).show();
+                });
+            }
+            @Override public void notice(String msg) { }
         });
     }
 
