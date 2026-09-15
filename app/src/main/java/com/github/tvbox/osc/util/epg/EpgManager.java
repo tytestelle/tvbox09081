@@ -79,6 +79,11 @@ import okhttp3.Response;
  *   优先使用 files/epg_data_cache.json；若不存在，则回退 assets 内置版本。
  *   启动时后台从 GitHub 母版拉取最新数据并原子覆盖缓存，成功后重新加载
  *   映射表。拉取失败或内容未变则不动，保证功能不中断。
+ *
+ *   【更新逻辑】
+ *   远程同步基于 .hash 文件的精确比对：请求 <epg_data-url>.hash，
+ *   与本地 epg_data_cache.hash 比较。若不同，则下载新的 epg_data.json
+ *   并更新本地哈希记录；若相同，则跳过。不再使用固定 6 小时刷新间隔。
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -98,15 +103,15 @@ public class EpgManager {
     private static final String GITHUB_LOGO_BASE_URL =
             "https://raw.githubusercontent.com/tytestelle/logo/main/ico/logo/";
 
-    /** GitHub 仓库 epg_data.json 的远程地址（使用加速链接）。 */
+    /** GitHub 仓库 epg_data.json 的远程地址（使用你提供的原始链接）。 */
     private static final String EPG_DATA_REMOTE_URL =
-            "https://raw.githubusercontent.com/tytestelle/tvbox09081/main/app/src/main/assets/epg_data.json";
+            "https://raw.githubusercontent.com/tytestelle/sandiJMYG/main/epg_data/epg_data.json";
 
     /** 本地缓存文件名（存储在 filesDir 下，与 assets 内置版本区分）。 */
     private static final String EPG_DATA_CACHE_FILE = "epg_data_cache.json";
 
-    /** 两次远程拉取之间的最小间隔（毫秒），避免频繁请求 GitHub。 */
-    private static final long EPG_DATA_MIN_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000L; // 6 小时
+    /** 本地 epg_data.json 哈希记录文件。 */
+    private static final String EPG_DATA_HASH_FILE = "epg_data_cache.hash";
 
     /** 分组切换时聚合 EPG 预热的延迟窗口（毫秒）。 */
     private static final long EPG_WARMUP_DELAY_MS = 150L;
@@ -125,6 +130,7 @@ public class EpgManager {
     private final File logoDir;
     private final File dynamicEpgIdsFile;
     private final File epgDataCacheFile;
+    private final File epgDataHashFile;
 
     private volatile String epgUrl;
     private volatile boolean parsing;
@@ -152,7 +158,6 @@ public class EpgManager {
     private final Set<String> loadedEpgIds = new HashSet<>();
 
     // epg_data.json 远程同步状态
-    private volatile long lastEpgDataRefreshTime = 0L;
     private volatile boolean epgDataRefreshRunning = false;
 
     // 保留旧的偏好设置键，兼容外部调用，但新的加载链路不再依赖它。
@@ -195,6 +200,7 @@ public class EpgManager {
         if (!logoDir.exists()) logoDir.mkdirs();
         dynamicEpgIdsFile = new File(context.getFilesDir(), DYNAMIC_EPG_IDS_FILE);
         epgDataCacheFile = new File(context.getFilesDir(), EPG_DATA_CACHE_FILE);
+        epgDataHashFile = new File(context.getFilesDir(), EPG_DATA_HASH_FILE);
 
         epgUrl = normalizeEpgUrl(EpgSettings.getEpgUrl(context));
         if (TextUtils.isEmpty(epgUrl)) loadDefaultEpgUrl();
@@ -203,7 +209,7 @@ public class EpgManager {
         loadDynamicEpgIds();
 
         // 后台尝试从 GitHub 拉取最新母版，不阻塞启动
-        refreshEpgDataFromRemote(false);
+        refreshEpgDataFromRemote();
     }
 
     // ======================== epg_data.json ========================
@@ -279,22 +285,43 @@ public class EpgManager {
     // ======================== epg_data.json 远程同步 ========================
     /**
      * 从 GitHub 仓库拉取 epg_data.json 母版，覆盖本地缓存并重新加载映射表。
-     *
-     * @param force true 时忽略最小间隔限制，强制拉取
+     * 更新逻辑：先请求远程 <epg_data-url>.hash，与本地 epg_data_cache.hash 比较。
+     * 若哈希不同（或本地缓存文件不存在），则下载新文件并更新本地哈希；
+     * 若哈希相同，则跳过下载。
      */
-    public void refreshEpgDataFromRemote(final boolean force) {
+    public void refreshEpgDataFromRemote() {
         if (epgDataRefreshRunning) {
             FileLogger.write(TAG, "epg_data.json 远程同步正在进行中，跳过");
-            return;
-        }
-        long now = System.currentTimeMillis();
-        if (!force && (now - lastEpgDataRefreshTime) < EPG_DATA_MIN_REFRESH_INTERVAL_MS) {
-            FileLogger.write(TAG, "epg_data.json 距上次刷新不足最小间隔，跳过");
             return;
         }
         epgDataRefreshRunning = true;
         epgExecutor.execute(() -> {
             try {
+                // 1. 获取远程哈希值
+                final String hashUrl = EPG_DATA_REMOTE_URL + ".hash";
+                FileLogger.write(TAG, "epg_data.json 哈希检查开始: hashUrl=" + hashUrl);
+                String remoteHash = fetchRemoteHash(hashUrl);
+                if (TextUtils.isEmpty(remoteHash)) {
+                    FileLogger.write(TAG, "远程 epg_data.json 哈希获取失败，跳过更新");
+                    return;
+                }
+
+                // 2. 读取本地哈希值
+                String localHash = readText(epgDataHashFile);
+                FileLogger.write(TAG, "epg_data.json 哈希比对: remote=" + remoteHash
+                        + ", local=" + (TextUtils.isEmpty(localHash) ? "<empty>" : localHash));
+
+                // 3. 哈希相同且本地缓存文件有效 → 无需更新
+                if (remoteHash.equals(localHash)
+                        && epgDataCacheFile.exists()
+                        && epgDataCacheFile.length() > 0) {
+                    FileLogger.write(TAG, "epg_data.json 哈希未变化，无需更新");
+                    return;
+                }
+
+                // 4. 哈希不同或本地文件不存在 → 下载新文件
+                FileLogger.write(TAG, "epg_data.json 哈希已变化或本地文件不存在，开始下载: "
+                        + EPG_DATA_REMOTE_URL);
                 Request request = new Request.Builder()
                         .url(EPG_DATA_REMOTE_URL)
                         .header("Cache-Control", "no-cache")
@@ -326,14 +353,7 @@ public class EpgManager {
                         return;
                     }
 
-                    // 内容完全相同则不动本地缓存
-                    if (isSameFileContent(epgDataCacheFile, data)) {
-                        FileLogger.write(TAG, "远程 epg_data.json 无变化");
-                        lastEpgDataRefreshTime = System.currentTimeMillis();
-                        return;
-                    }
-
-                    // 原子写盘
+                    // 原子写盘：先写临时文件，再重命名覆盖
                     File tmp = new File(context.getFilesDir(), EPG_DATA_CACHE_FILE + ".tmp");
                     try (FileOutputStream out = new FileOutputStream(tmp)) {
                         out.write(data);
@@ -346,12 +366,14 @@ public class EpgManager {
                         tmp.delete();
                     }
 
+                    // 更新本地哈希记录文件
+                    writeTextAtomically(epgDataHashFile, remoteHash);
+
                     FileLogger.write(TAG, "远程 epg_data.json 已更新，size=" + data.length
-                            + "，即将重新加载映射");
+                            + "，hash=" + remoteHash + "，即将重新加载映射");
 
                     // 重新加载映射表
                     loadEpgDataMap();
-                    lastEpgDataRefreshTime = System.currentTimeMillis();
 
                     // 母版更新后，清理已被覆盖的动态回填条目
                     pruneDynamicEpgIds();
@@ -362,18 +384,6 @@ public class EpgManager {
                 epgDataRefreshRunning = false;
             }
         });
-    }
-
-    private boolean isSameFileContent(File file, byte[] data) {
-        if (file == null || !file.exists() || data == null) return false;
-        if (file.length() != data.length) return false;
-        try (FileInputStream in = new FileInputStream(file)) {
-            byte[] existing = new byte[data.length];
-            int read = in.read(existing);
-            return read == data.length && java.util.Arrays.equals(existing, data);
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     /**
