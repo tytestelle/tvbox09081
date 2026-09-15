@@ -16,6 +16,7 @@ import com.google.gson.JsonParser;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserFactory;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -64,7 +65,7 @@ import okhttp3.Response;
  *   4) 全部失败 → 返回 null，调用方不显示台标
  *
  * EPG ID 解析策略（按优先级）：
- *   1) assets/epg_data.json 的静态映射；
+ *   1) assets/epg_data.json 的静态映射（或本地缓存版本，见下）；
  *   2) 运行期回填的动态映射 dynamic_epg_ids.json（等价于把新条目写进
  *      epg_data.json，下次启动直接命中）；
  *   3) 仍未命中时用“候选名”去 XMLTV 的 display-name 里做精确匹配，候选规则：
@@ -74,13 +75,10 @@ import okhttp3.Response;
  *      dynamic_epg_ids.json；
  *   4) 全部未命中 → 视为 XMLTV 中确实没有该频道，不做处理。
  *
- * 分组切换自动预热策略：
- *   UI 侧在分组切换时通常会为每个频道调 loadProcessedChannelIcon 加载台标。
- *   本类利用这一入口：凡是 loadProcessedChannelIcon 被调用，如果当前频道
- *   所属的 EPG 分组尚未解析，就把该频道名暂存到 pendingEpgWarmup，150ms
- *   内聚合所有频道名后异步调用一次 loadChannelGroup，解析整个分组的
- *   XMLTV，从而使 getProgramsForChannel 立刻有数据。同时 loadChannelGroup
- *   完成后又反过来为整个分组的频道预热台标，两边互为兜底。
+ * epg_data.json 远程同步：
+ *   优先使用 files/epg_data_cache.json；若不存在，则回退 assets 内置版本。
+ *   启动时后台从 GitHub 母版拉取最新数据并原子覆盖缓存，成功后重新加载
+ *   映射表。拉取失败或内容未变则不动，保证功能不中断。
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -100,6 +98,16 @@ public class EpgManager {
     private static final String GITHUB_LOGO_BASE_URL =
             "https://raw.githubusercontent.com/tytestelle/logo/main/ico/logo/";
 
+    /** GitHub 仓库 epg_data.json 的远程地址（使用加速链接）。 */
+    private static final String EPG_DATA_REMOTE_URL =
+            "https://raw.githubusercontent.com/tytestelle/tvbox09081/main/app/src/main/assets/epg_data.json";
+
+    /** 本地缓存文件名（存储在 filesDir 下，与 assets 内置版本区分）。 */
+    private static final String EPG_DATA_CACHE_FILE = "epg_data_cache.json";
+
+    /** 两次远程拉取之间的最小间隔（毫秒），避免频繁请求 GitHub。 */
+    private static final long EPG_DATA_MIN_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000L; // 6 小时
+
     /** 分组切换时聚合 EPG 预热的延迟窗口（毫秒）。 */
     private static final long EPG_WARMUP_DELAY_MS = 150L;
 
@@ -116,6 +124,7 @@ public class EpgManager {
     private final File localHashFile;
     private final File logoDir;
     private final File dynamicEpgIdsFile;
+    private final File epgDataCacheFile;
 
     private volatile String epgUrl;
     private volatile boolean parsing;
@@ -141,6 +150,10 @@ public class EpgManager {
     private final Map<String, List<EpgProgram>> programsByEpgId = new HashMap<>();
     private final Map<String, String> iconUrlByEpgId = new HashMap<>();
     private final Set<String> loadedEpgIds = new HashSet<>();
+
+    // epg_data.json 远程同步状态
+    private volatile long lastEpgDataRefreshTime = 0L;
+    private volatile boolean epgDataRefreshRunning = false;
 
     // 保留旧的偏好设置键，兼容外部调用，但新的加载链路不再依赖它。
     private static final String LOGO_PREFS = "logo_settings";
@@ -181,19 +194,41 @@ public class EpgManager {
         logoDir = new File(context.getFilesDir(), LOGO_DIR_NAME);
         if (!logoDir.exists()) logoDir.mkdirs();
         dynamicEpgIdsFile = new File(context.getFilesDir(), DYNAMIC_EPG_IDS_FILE);
+        epgDataCacheFile = new File(context.getFilesDir(), EPG_DATA_CACHE_FILE);
 
         epgUrl = normalizeEpgUrl(EpgSettings.getEpgUrl(context));
         if (TextUtils.isEmpty(epgUrl)) loadDefaultEpgUrl();
-        loadEpgDataMap();
+
+        loadEpgDataMap();   // 缓存优先，回退 assets
         loadDynamicEpgIds();
+
+        // 后台尝试从 GitHub 拉取最新母版，不阻塞启动
+        refreshEpgDataFromRemote(false);
     }
 
     // ======================== epg_data.json ========================
+    /**
+     * 加载 epg_data.json。
+     * 优先使用本地缓存 files/epg_data_cache.json（由远程同步写入）；
+     * 缓存不存在或损坏时回退到 assets 内置版本。
+     */
     private void loadEpgDataMap() {
         synchronized (nameToEpgId) {
             nameToEpgId.clear();
-            try (InputStream is = context.getAssets().open("epg_data.json")) {
-                JsonObject root = JsonParser.parseReader(new InputStreamReader(is, StandardCharsets.UTF_8)).getAsJsonObject();
+            InputStream is = null;
+            String source;
+            try {
+                if (epgDataCacheFile != null
+                        && epgDataCacheFile.exists()
+                        && epgDataCacheFile.length() > 0) {
+                    is = new FileInputStream(epgDataCacheFile);
+                    source = "本地缓存(" + epgDataCacheFile.getAbsolutePath() + ")";
+                } else {
+                    is = context.getAssets().open("epg_data.json");
+                    source = "内置 assets";
+                }
+                JsonObject root = JsonParser.parseReader(
+                        new InputStreamReader(is, StandardCharsets.UTF_8)).getAsJsonObject();
                 JsonArray epgs = root.getAsJsonArray("epgs");
                 if (epgs == null) return;
                 for (int i = 0; i < epgs.size(); i++) {
@@ -207,11 +242,163 @@ public class EpgManager {
                         if (!key.isEmpty()) nameToEpgId.put(key, epgid);
                     }
                 }
-                FileLogger.write(TAG, "加载 epg_data.json 成功，共 " + nameToEpgId.size() + " 个频道变种");
+                FileLogger.write(TAG, "加载 epg_data.json 成功[" + source + "]，共 "
+                        + nameToEpgId.size() + " 个频道变种");
             } catch (Exception e) {
-                FileLogger.write(TAG, "加载 epg_data.json 失败", e);
+                FileLogger.write(TAG, "加载 epg_data.json 失败[" +
+                        (epgDataCacheFile != null && epgDataCacheFile.exists() ? "缓存" : "assets") +
+                        "]，尝试回退 assets", e);
+                // 若缓存损坏，删除缓存并回退 assets
+                if (epgDataCacheFile != null && epgDataCacheFile.exists()) {
+                    try { epgDataCacheFile.delete(); } catch (Exception ignored) { }
+                    try (InputStream fallback = context.getAssets().open("epg_data.json")) {
+                        JsonObject root = JsonParser.parseReader(new InputStreamReader(
+                                fallback, StandardCharsets.UTF_8)).getAsJsonObject();
+                        JsonArray epgs = root.getAsJsonArray("epgs");
+                        if (epgs != null) {
+                            for (int i = 0; i < epgs.size(); i++) {
+                                JsonObject item = epgs.get(i).getAsJsonObject();
+                                if (!item.has("epgid") || !item.has("name")) continue;
+                                String epgid = item.get("epgid").getAsString().trim();
+                                String names = item.get("name").getAsString();
+                                for (String variant : names.split(",")) {
+                                    String key = variant == null ? "" : variant.trim();
+                                    if (!key.isEmpty()) nameToEpgId.put(key, epgid);
+                                }
+                            }
+                        }
+                        FileLogger.write(TAG, "回退 assets 成功，共 " + nameToEpgId.size() + " 个频道变种");
+                    } catch (Exception ignored) { }
+                }
+            } finally {
+                if (is != null) try { is.close(); } catch (Exception ignored) { }
             }
         }
+    }
+
+    // ======================== epg_data.json 远程同步 ========================
+    /**
+     * 从 GitHub 仓库拉取 epg_data.json 母版，覆盖本地缓存并重新加载映射表。
+     *
+     * @param force true 时忽略最小间隔限制，强制拉取
+     */
+    public void refreshEpgDataFromRemote(final boolean force) {
+        if (epgDataRefreshRunning) {
+            FileLogger.write(TAG, "epg_data.json 远程同步正在进行中，跳过");
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (!force && (now - lastEpgDataRefreshTime) < EPG_DATA_MIN_REFRESH_INTERVAL_MS) {
+            FileLogger.write(TAG, "epg_data.json 距上次刷新不足最小间隔，跳过");
+            return;
+        }
+        epgDataRefreshRunning = true;
+        epgExecutor.execute(() -> {
+            try {
+                Request request = new Request.Builder()
+                        .url(EPG_DATA_REMOTE_URL)
+                        .header("Cache-Control", "no-cache")
+                        .get()
+                        .build();
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (!response.isSuccessful() || response.body() == null) {
+                        FileLogger.write(TAG, "远程 epg_data.json 拉取失败 HTTP " + response.code());
+                        return;
+                    }
+                    byte[] data = response.body().bytes();
+                    if (data == null || data.length == 0) {
+                        FileLogger.write(TAG, "远程 epg_data.json 内容为空，跳过");
+                        return;
+                    }
+
+                    // 结构校验：能解析成 JSON 且含 epgs 数组才认
+                    JsonObject remoteRoot;
+                    try {
+                        remoteRoot = JsonParser.parseReader(new InputStreamReader(
+                                new ByteArrayInputStream(data),
+                                StandardCharsets.UTF_8)).getAsJsonObject();
+                    } catch (Exception e) {
+                        FileLogger.write(TAG, "远程 epg_data.json 不是合法 JSON，跳过", e);
+                        return;
+                    }
+                    if (remoteRoot.getAsJsonArray("epgs") == null) {
+                        FileLogger.write(TAG, "远程 epg_data.json 缺少 epgs 字段，跳过");
+                        return;
+                    }
+
+                    // 内容完全相同则不动本地缓存
+                    if (isSameFileContent(epgDataCacheFile, data)) {
+                        FileLogger.write(TAG, "远程 epg_data.json 无变化");
+                        lastEpgDataRefreshTime = System.currentTimeMillis();
+                        return;
+                    }
+
+                    // 原子写盘
+                    File tmp = new File(context.getFilesDir(), EPG_DATA_CACHE_FILE + ".tmp");
+                    try (FileOutputStream out = new FileOutputStream(tmp)) {
+                        out.write(data);
+                        out.flush();
+                        try { out.getFD().sync(); } catch (Exception ignored) { }
+                    }
+                    if (epgDataCacheFile.exists()) epgDataCacheFile.delete();
+                    if (!tmp.renameTo(epgDataCacheFile)) {
+                        copyFile(tmp, epgDataCacheFile);
+                        tmp.delete();
+                    }
+
+                    FileLogger.write(TAG, "远程 epg_data.json 已更新，size=" + data.length
+                            + "，即将重新加载映射");
+
+                    // 重新加载映射表
+                    loadEpgDataMap();
+                    lastEpgDataRefreshTime = System.currentTimeMillis();
+
+                    // 母版更新后，清理已被覆盖的动态回填条目
+                    pruneDynamicEpgIds();
+                }
+            } catch (Exception e) {
+                FileLogger.write(TAG, "远程 epg_data.json 刷新异常", e);
+            } finally {
+                epgDataRefreshRunning = false;
+            }
+        });
+    }
+
+    private boolean isSameFileContent(File file, byte[] data) {
+        if (file == null || !file.exists() || data == null) return false;
+        if (file.length() != data.length) return false;
+        try (FileInputStream in = new FileInputStream(file)) {
+            byte[] existing = new byte[data.length];
+            int read = in.read(existing);
+            return read == data.length && java.util.Arrays.equals(existing, data);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 母版更新后清理动态回填表：如果某条 dynamic 映射现在已经被静态表命中，
+     * 说明它已经并入母版，可以从动态表里移除。
+     */
+    private void pruneDynamicEpgIds() {
+        boolean changed = false;
+        synchronized (dynamicEpgIds) {
+            java.util.Iterator<Map.Entry<String, String>> it = dynamicEpgIds.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<String, String> e = it.next();
+                String staticHit;
+                synchronized (nameToEpgId) {
+                    staticHit = nameToEpgId.get(e.getKey());
+                }
+                if (staticHit != null) {
+                    FileLogger.write(TAG, "动态映射已被母版覆盖，移除: name=["
+                            + e.getKey() + "] -> [" + staticHit + "]");
+                    it.remove();
+                    changed = true;
+                }
+            }
+        }
+        if (changed) saveDynamicEpgIds();
     }
 
     // ======================== 动态 EPG ID 映射 ========================
