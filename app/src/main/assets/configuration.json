@@ -67,7 +67,7 @@
     "LIVE_URLS": "http://io8.myartsonline.com/z/5c.txt$5c直播",
 
     "#19": "预置EPG URL(默认勾选首个)，多个使用双竖线||隔开，格式：地址$自定义名称，地址携带参数需要使用json格式，参考EPG订阅提示信息，解析类型需要添加format参数，如{\"url\":\"http://xxx\",\"headers\":{\"User-Agent\":\"Player\"},\"format\":\"XML\"}",
-    "EPG_URLS": "https://raw.githubusercontent.com/9602894/sandiJMYG/main/epg_data/epg_merged.xml$epg",
+    "EPG_URLS": "https://raw.githubusercontent.com/tytestelle/sandiJMYG/main/epg_data/epg_merged.xml$epg",
 
     "#71": "预置JSON URL(默认不勾选)，多个使用双竖线||隔开，格式：地址$自定义名称",
     "LIVE_JSONS": null,
