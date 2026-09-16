@@ -142,8 +142,6 @@ public class LivePlayActivity extends BaseActivity {
     private static final float GESTURE_EDGE_RATIO = 0.18f;
     private static final long BOTTOM_INFO_SHOW_DURATION = 5000L;
 
-    // ★ 新增：时间/网速显示位置持久化 key
-    // 位置约定：0=左上角 1=右上角 2=左下角 3=右下角
     private static final String KEY_LIVE_TIME_POSITION = "LIVE_TIME_POSITION";
     private static final String KEY_LIVE_NET_SPEED_POSITION = "LIVE_NET_SPEED_POSITION";
 
@@ -169,7 +167,6 @@ public class LivePlayActivity extends BaseActivity {
     private LinearLayout llChannelTags;
     private int mCurrentVideoW = 0, mCurrentVideoH = 0;
 
-    // ★ 新增：记录鼠标最近悬停过的分组下标，避免同一分组重复加载
     private int mLastHoveredGroupIndex = -1;
 
     private View ku9ProgramGuide;
@@ -345,7 +342,6 @@ public class LivePlayActivity extends BaseActivity {
     private String logoUrl = null;
     private List<Epginfo> epgdata = new ArrayList<>();
 
-    // ★ 新增：启动时强制刷新一次直播配置（仅在冷启动的第一次初始化时触发）
     private boolean forceRefreshLiveConfig = true;
 
     @Override
@@ -532,7 +528,6 @@ public class LivePlayActivity extends BaseActivity {
             finish();
         }
     }
-
     private void setupBottomInfoBar() {
         llBottomInfoBar = findViewById(R.id.ll_bottom_info_bar);
         if (llBottomInfoBar == null) {
@@ -758,12 +753,6 @@ public class LivePlayActivity extends BaseActivity {
         }
     }
 
-    /**
-     * ★ 新增：安全执行 RecyclerView 上的焦点/数据变更操作。
-     * RecyclerView 规定：不能在 onLayout / onMeasure / scroll 期间调用 notifyDataSetChanged，
-     * 否则会抛 IllegalStateException: Cannot call this method while RecyclerView is computing a layout or scrolling。
-     * 当目标 RV 忙时，把动作延后一帧执行。
-     */
     private void safeRecyclerAction(final TvRecyclerView rv, final Runnable action) {
         if (action == null) return;
         if (rv == null) { action.run(); return; }
@@ -781,14 +770,12 @@ public class LivePlayActivity extends BaseActivity {
         mSourceListView.setAdapter(liveSourceAdapter);
         mSourceListView.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
-                // ★ 修复：延后一帧，避免在 layout/scroll 中触发 notifyDataSetChanged
                 safeRecyclerAction(mSourceListView, () -> {
                     if (liveSourceAdapter != null) liveSourceAdapter.setFocusedPosition(-1);
                 });
             }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 final int pos = position;
-                // ★ 修复：延后一帧
                 safeRecyclerAction(mSourceListView, () -> {
                     if (liveSourceAdapter != null) liveSourceAdapter.setFocusedPosition(pos);
                 });
@@ -975,7 +962,6 @@ public class LivePlayActivity extends BaseActivity {
         } catch (Exception e) { FileLogger.write("LivePlay", "获取当前频道组 EPG 名称失败", e); }
         return names;
     }
-
     public void getEpg(Date date) {
         if (channel_Name == null) return;
         final String channelName = channel_Name.getChannelName();
@@ -2281,7 +2267,6 @@ public class LivePlayActivity extends BaseActivity {
         ku9GuideChannelList.setAdapter(ku9GuideChannelAdapter);
         ku9GuideChannelList.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
-                // ★ 修复：延后一帧
                 safeRecyclerAction(ku9GuideChannelList, () -> {
                     if (ku9GuideChannelAdapter != null) ku9GuideChannelAdapter.setFocusedIndex(-1);
                 });
@@ -2289,7 +2274,6 @@ public class LivePlayActivity extends BaseActivity {
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 ku9GuideChannelFocusPosition = position;
                 final int pos = position;
-                // ★ 修复：延后一帧
                 safeRecyclerAction(ku9GuideChannelList, () -> {
                     if (ku9GuideChannelAdapter != null) ku9GuideChannelAdapter.setFocusedIndex(pos);
                 });
@@ -2304,14 +2288,12 @@ public class LivePlayActivity extends BaseActivity {
         ku9GuideDateList.setAdapter(ku9GuideDateAdapter);
         ku9GuideDateList.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
-                // ★ 修复：延后一帧
                 safeRecyclerAction(ku9GuideDateList, () -> {
                     if (ku9GuideDateAdapter != null) ku9GuideDateAdapter.setFocusedIndex(-1);
                 });
             }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 final int pos = position;
-                // ★ 修复：延后一帧
                 safeRecyclerAction(ku9GuideDateList, () -> {
                     if (ku9GuideDateAdapter == null) return;
                     ku9GuideDateAdapter.setFocusedIndex(pos);
@@ -2356,14 +2338,12 @@ public class LivePlayActivity extends BaseActivity {
         ku9GuideProgramList.setAdapter(ku9GuideProgramAdapter);
         ku9GuideProgramList.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
-                // ★ 修复：延后一帧
                 safeRecyclerAction(ku9GuideProgramList, () -> {
                     if (ku9GuideProgramAdapter != null) ku9GuideProgramAdapter.setFocusedIndex(-1);
                 });
             }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 final int pos = position;
-                // ★ 修复：延后一帧
                 safeRecyclerAction(ku9GuideProgramList, () -> {
                     if (ku9GuideProgramAdapter != null) ku9GuideProgramAdapter.setFocusedIndex(pos);
                 });
@@ -2729,14 +2709,12 @@ public class LivePlayActivity extends BaseActivity {
         });
         mRightEpgList.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
-                // ★ 修复：延后一帧
                 safeRecyclerAction(mRightEpgList, () -> {
                     if (epgListAdapter != null) epgListAdapter.setFocusedEpgIndex(-1);
                 });
             }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 final int pos = position;
-                // ★ 修复：延后一帧
                 safeRecyclerAction(mRightEpgList, () -> {
                     if (epgListAdapter != null) epgListAdapter.setFocusedEpgIndex(pos);
                 });
@@ -2927,7 +2905,6 @@ public class LivePlayActivity extends BaseActivity {
         mChannelGroupView.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
-                // ★ 遥控器/键盘焦点移动到分组：自动加载该分组台标 + EPG 节目预告到频道名称下
                 final int pos = position;
                 safeRecyclerAction(mChannelGroupView, () -> selectChannelGroup(pos, true, -1));
             }
@@ -2935,7 +2912,6 @@ public class LivePlayActivity extends BaseActivity {
         });
         liveChannelGroupAdapter.setOnItemClickListener((adapter, view, position) -> { FastClickCheckUtil.check(view); selectChannelGroup(position, false, -1); });
 
-        // ★ 新增：鼠标悬停到分组时也自动加载该分组的台标 + EPG 节目预告到频道名称下
         mChannelGroupView.setOnHoverListener((v, event) -> {
             int action = event.getAction();
             if (action == MotionEvent.ACTION_HOVER_ENTER || action == MotionEvent.ACTION_HOVER_MOVE) {
@@ -3004,7 +2980,6 @@ public class LivePlayActivity extends BaseActivity {
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 if (position < 0) return;
                 final int pos = position;
-                // ★ 修复：延后一帧
                 safeRecyclerAction(mLiveChannelView, () -> {
                     if (liveChannelGroupAdapter != null) liveChannelGroupAdapter.setFocusedGroupIndex(-1);
                     if (liveChannelItemAdapter != null) liveChannelItemAdapter.setFocusedChannelIndex(pos);
@@ -3045,7 +3020,6 @@ public class LivePlayActivity extends BaseActivity {
             @Override public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) { }
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 final int pos = position;
-                // ★ 修复：延后一帧
                 safeRecyclerAction(mSettingGroupView, () -> selectVisibleSettingGroup(pos, true));
             }
             @Override public void onItemClick(TvRecyclerView parent, View itemView, int position) { }
@@ -3125,7 +3099,6 @@ public class LivePlayActivity extends BaseActivity {
             @Override public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
                 if (position < 0) return;
                 final int pos = position;
-                // ★ 修复：延后一帧
                 safeRecyclerAction(mSettingItemView, () -> {
                     if (liveSettingGroupAdapter != null) liveSettingGroupAdapter.setFocusedGroupIndex(-1);
                     if (liveSettingItemAdapter != null) liveSettingItemAdapter.setFocusedItemIndex(pos);
@@ -3176,7 +3149,6 @@ public class LivePlayActivity extends BaseActivity {
                 boolean showPositionDialog = false;
                 switch (position) {
                     case 0:
-                        // ★ 修改：显示时间 → 弹出位置选择对话框
                         showPositionDialog = true;
                         showDisplayPositionDialog("显示时间",
                                 Hawk.get(HawkConfig.LIVE_SHOW_TIME, false),
@@ -3189,7 +3161,6 @@ public class LivePlayActivity extends BaseActivity {
                                 });
                         break;
                     case 1:
-                        // ★ 修改：显示网速 → 弹出位置选择对话框
                         showPositionDialog = true;
                         showDisplayPositionDialog("显示网速",
                                 Hawk.get(HawkConfig.LIVE_SHOW_NET_SPEED, false),
@@ -3309,10 +3280,6 @@ public class LivePlayActivity extends BaseActivity {
         mHandler.postDelayed(mHideSettingLayoutRun, postTimeout);
     }
 
-    /**
-     * ★ 新增：根据位置索引设置视图在 FrameLayout 中的 gravity。
-     * 位置约定：0=左上 1=右上 2=左下 3=右下
-     */
     private void applyOverlayPosition(View view, int position) {
         if (view == null) return;
         android.view.ViewParent parent = view.getParent();
@@ -3333,18 +3300,14 @@ public class LivePlayActivity extends BaseActivity {
         lp.topMargin = margin;
         lp.bottomMargin = margin;
         switch (position) {
-            case 1:  lp.gravity = Gravity.TOP    | Gravity.END;   break; // 右上
-            case 2:  lp.gravity = Gravity.BOTTOM | Gravity.START; break; // 左下
-            case 3:  lp.gravity = Gravity.BOTTOM | Gravity.END;   break; // 右下
-            default: lp.gravity = Gravity.TOP    | Gravity.START;        // 左上
+            case 1:  lp.gravity = Gravity.TOP    | Gravity.END;   break;
+            case 2:  lp.gravity = Gravity.BOTTOM | Gravity.START; break;
+            case 3:  lp.gravity = Gravity.BOTTOM | Gravity.END;   break;
+            default: lp.gravity = Gravity.TOP    | Gravity.START;
         }
         view.setLayoutParams(lp);
     }
 
-    /**
-     * ★ 新增：显示位置选择对话框（不显示 / 左上 / 右上 / 左下 / 右下）
-     * 使用自定义黑透明风格，与"直播订阅"对话框保持一致。
-     */
     private void showDisplayPositionDialog(String title, boolean currentEnabled, int currentPos,
                                            DisplayPositionCallback callback) {
         final String[] options = {"不显示", "左上角", "右上角", "左下角", "右下角"};
@@ -3352,7 +3315,6 @@ public class LivePlayActivity extends BaseActivity {
 
         final android.app.Dialog dialog = new android.app.Dialog(this);
 
-        // 外层容器：黑透明 + 圆角
         LinearLayout container = new LinearLayout(this);
         container.setOrientation(LinearLayout.VERTICAL);
         container.setPadding(dp(24), dp(20), dp(24), dp(16));
@@ -3362,7 +3324,6 @@ public class LivePlayActivity extends BaseActivity {
         bg.setStroke(dp(1), 0x33FFFFFF);
         container.setBackground(bg);
 
-        // 标题
         TextView titleView = new TextView(this);
         titleView.setText(title);
         titleView.setTextColor(0xFF00E5D0);
@@ -3371,7 +3332,6 @@ public class LivePlayActivity extends BaseActivity {
         titleView.setPadding(0, 0, 0, dp(14));
         container.addView(titleView);
 
-        // 选项按钮
         for (int i = 0; i < options.length; i++) {
             final int index = i;
             boolean selected = (i == checked);
@@ -3401,7 +3361,6 @@ public class LivePlayActivity extends BaseActivity {
             container.addView(option);
         }
 
-        // 取消按钮
         TextView cancel = new TextView(this);
         cancel.setText("取消");
         cancel.setTextSize(14);
@@ -3434,7 +3393,6 @@ public class LivePlayActivity extends BaseActivity {
         void onResult(boolean enabled, int position);
     }
 
-    /** ★ 新增：位置显示文案 */
     private String getPositionLabel(boolean enabled, int pos) {
         if (!enabled) return "关闭";
         switch (pos) {
@@ -3445,7 +3403,6 @@ public class LivePlayActivity extends BaseActivity {
         }
     }
 
-    /** ★ 新增：从对话框返回后刷新「显示设置」分组的条目状态与文案 */
     private void refreshDisplaySettingItems() {
         if (liveSettingItemAdapter == null || liveSettingGroupAdapter == null) return;
         if (liveSettingGroupAdapter.getSelectedGroupIndex() != 4) return;
@@ -3868,7 +3825,6 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private void initLiveChannelList() {
-        // ★ 修改：启动时强制联网刷新一次，确保每次进入 APP 都从网络更新订阅内容
         if (forceRefreshLiveConfig) {
             forceRefreshLiveConfig = false;
             loadLiveConfigOnEnter();
@@ -3885,11 +3841,6 @@ public class LivePlayActivity extends BaseActivity {
 
     private boolean loadingLiveConfigOnEnter = false;
 
-    /**
-     * ★ 修改：启动时强制联网刷新直播订阅。
-     * 对普通 HTTP 订阅直接发起网络请求，完全绕过 ApiConfig 的缓存判断；
-     * 对代理/脚本类型（127.0.0.1、.py、.js）仍走 ApiConfig.loadLiveConfig(true, ...)。
-     */
     private void loadLiveConfigOnEnter() {
         if (loadingLiveConfigOnEnter) return;
         loadingLiveConfigOnEnter = true;
@@ -3904,7 +3855,6 @@ public class LivePlayActivity extends BaseActivity {
             return;
         }
 
-        // 代理 / 脚本类型（127.0.0.1、.py、.js）只能交给 ApiConfig 处理
         if (liveApiUrl.startsWith("http://127.0.0.1")
                 || liveApiUrl.contains(".py")
                 || liveApiUrl.contains(".js")) {
@@ -3926,13 +3876,13 @@ public class LivePlayActivity extends BaseActivity {
             return;
         }
 
-        // 普通 HTTP 订阅：绕过 ApiConfig 缓存，直接联网拉取最新内容
         OkGo.<String>get(liveApiUrl).execute(new AbsCallback<String>() {
             @Override public String convertResponse(okhttp3.Response response) throws Throwable {
                 return response.body() != null ? response.body().string() : "";
             }
 
-            @Override public void onSuccess(Response<String> response) {
+            @Override
+            public void onSuccess(Response<String> response) {
                 if (response == null || response.body() == null || response.body().trim().isEmpty()) {
                     mHandler.post(() -> { loadingLiveConfigOnEnter = false; fallbackToCache("网络响应为空"); });
                     return;
@@ -3954,7 +3904,8 @@ public class LivePlayActivity extends BaseActivity {
                 });
             }
 
-            @Override public void onError(Response<String> response) {
+            @Override
+            public void onError(Response<String> response) {
                 String err = (response != null && response.getException() != null)
                         ? response.getException().getMessage() : "未知";
                 mHandler.post(() -> { loadingLiveConfigOnEnter = false; fallbackToCache("网络请求失败: " + err); });
@@ -3962,7 +3913,6 @@ public class LivePlayActivity extends BaseActivity {
         });
     }
 
-    /** ★ 新增：刷新成功后直接应用最新频道列表，不再走 shouldReloadLiveConfig 判断 */
     private void applyLiveConfigAfterRefresh() {
         List<LiveChannelGroup> list = ApiConfig.get().getChannelGroupList();
         if (list == null || list.isEmpty()) {
@@ -3979,7 +3929,6 @@ public class LivePlayActivity extends BaseActivity {
         safeInitSettingPanel();
     }
 
-    /** ★ 新增：网络刷新失败时回退：先尝试 ApiConfig 内部缓存，再判断是否彻底为空 */
     private void fallbackToCache(String reason) {
         ApiConfig.get().loadLiveConfig(false, new ApiConfig.LoadConfigCallback() {
             @Override public void success() {
@@ -4156,7 +4105,13 @@ public class LivePlayActivity extends BaseActivity {
                 && currentLiveChannelItem.getSourceIndex() < currentLiveChannelItem.getChannelUrls().size();
     }
 
-    private int getDefaultSettingGroupIndex() { return 0; }
+    private int getDefaultSettingGroupIndex() {
+        if (liveSettingGroupList != null && !liveSettingGroupList.isEmpty()
+                && liveSettingGroupList.get(0) != null) {
+            return liveSettingGroupList.get(0).getGroupIndex();
+        }
+        return 0;
+    }
 
     private ArrayList<LiveSettingGroup> getVisibleLiveSettingGroupList() {
         ArrayList<LiveSettingGroup> visibleGroups = new ArrayList<>();
@@ -4167,11 +4122,84 @@ public class LivePlayActivity extends BaseActivity {
     private void initLiveSettingGroupList() {
         List<LiveSettingGroup> base = ApiConfig.get().getLiveSettingGroupList();
         liveSettingGroupList = new ArrayList<>();
+
         if (base != null) {
             for (LiveSettingGroup g : base) {
                 if (g == null) continue;
                 if (g.getGroupIndex() < 7) liveSettingGroupList.add(g);
             }
+        }
+
+        if (liveSettingGroupList.isEmpty()) {
+            LiveSettingGroup g0 = new LiveSettingGroup();
+            g0.setGroupIndex(0);
+            g0.setGroupName("直播源");
+            g0.setLiveSettingItems(new ArrayList<LiveSettingItem>());
+            liveSettingGroupList.add(g0);
+
+            LiveSettingGroup g1 = new LiveSettingGroup();
+            g1.setGroupIndex(1);
+            g1.setGroupName("画面比例");
+            ArrayList<LiveSettingItem> scaleItems = new ArrayList<>();
+            String[] scaleNames = {"默认", "16:9", "4:3", "全屏", "自适应"};
+            for (int i = 0; i < scaleNames.length; i++) {
+                LiveSettingItem item = new LiveSettingItem();
+                item.setItemIndex(i);
+                item.setItemName(scaleNames[i]);
+                scaleItems.add(item);
+            }
+            g1.setLiveSettingItems(scaleItems);
+            liveSettingGroupList.add(g1);
+
+            LiveSettingGroup g2 = new LiveSettingGroup();
+            g2.setGroupIndex(2);
+            g2.setGroupName("播放器");
+            ArrayList<LiveSettingItem> playerItems = new ArrayList<>();
+            String[] playerNames = {"IJK", "EXO", "MX"};
+            for (int i = 0; i < playerNames.length; i++) {
+                LiveSettingItem item = new LiveSettingItem();
+                item.setItemIndex(i);
+                item.setItemName(playerNames[i]);
+                playerItems.add(item);
+            }
+            g2.setLiveSettingItems(playerItems);
+            liveSettingGroupList.add(g2);
+
+            LiveSettingGroup g3 = new LiveSettingGroup();
+            g3.setGroupIndex(3);
+            g3.setGroupName("连接超时");
+            ArrayList<LiveSettingItem> timeoutItems = new ArrayList<>();
+            for (int i = 0; i <= 5; i++) {
+                LiveSettingItem item = new LiveSettingItem();
+                item.setItemIndex(i);
+                item.setItemName(i + "秒");
+                timeoutItems.add(item);
+            }
+            g3.setLiveSettingItems(timeoutItems);
+            liveSettingGroupList.add(g3);
+
+            LiveSettingGroup g4 = new LiveSettingGroup();
+            g4.setGroupIndex(4);
+            g4.setGroupName("显示设置");
+            ArrayList<LiveSettingItem> displayItems = new ArrayList<>();
+            LiveSettingItem d0 = new LiveSettingItem(); d0.setItemIndex(0); d0.setItemName("显示时间"); displayItems.add(d0);
+            LiveSettingItem d1 = new LiveSettingItem(); d1.setItemIndex(1); d1.setItemName("显示网速"); displayItems.add(d1);
+            LiveSettingItem d2 = new LiveSettingItem(); d2.setItemIndex(2); d2.setItemName("频道反转"); displayItems.add(d2);
+            LiveSettingItem d3 = new LiveSettingItem(); d3.setItemIndex(3); d3.setItemName("跨组切换"); displayItems.add(d3);
+            g4.setLiveSettingItems(displayItems);
+            liveSettingGroupList.add(g4);
+
+            LiveSettingGroup g5 = new LiveSettingGroup();
+            g5.setGroupIndex(5);
+            g5.setGroupName("直播线路");
+            g5.setLiveSettingItems(new ArrayList<LiveSettingItem>());
+            liveSettingGroupList.add(g5);
+
+            LiveSettingGroup g6 = new LiveSettingGroup();
+            g6.setGroupIndex(6);
+            g6.setGroupName("直播历史");
+            g6.setLiveSettingItems(new ArrayList<LiveSettingItem>());
+            liveSettingGroupList.add(g6);
         }
 
         LiveSettingGroup timeoutGroup = findSettingGroupByIndex(3);
@@ -4186,7 +4214,6 @@ public class LivePlayActivity extends BaseActivity {
                 offItem.setItemName("关闭");
                 timeoutGroup.getLiveSettingItems().add(offItem);
             }
-
             for (LiveSettingItem item : timeoutGroup.getLiveSettingItems()) {
                 if (item != null) item.setItemSelected(false);
             }
@@ -4201,8 +4228,8 @@ public class LivePlayActivity extends BaseActivity {
         }
 
         LiveSettingGroup displayGroup = findSettingGroupByIndex(4);
-        if (displayGroup != null && displayGroup.getLiveSettingItems() != null && displayGroup.getLiveSettingItems().size() > 3) {
-            // ★ 修改：显示当前选择的方位到条目名称上
+        if (displayGroup != null && displayGroup.getLiveSettingItems() != null
+                && displayGroup.getLiveSettingItems().size() > 3) {
             boolean timeEnabled = Hawk.get(HawkConfig.LIVE_SHOW_TIME, false);
             int timePos = Hawk.get(KEY_LIVE_TIME_POSITION, 0);
             boolean speedEnabled = Hawk.get(HawkConfig.LIVE_SHOW_NET_SPEED, false);
@@ -4218,9 +4245,11 @@ public class LivePlayActivity extends BaseActivity {
             displayGroup.getLiveSettingItems().get(2).setItemSelected(Hawk.get(HawkConfig.LIVE_CHANNEL_REVERSE, false));
             displayGroup.getLiveSettingItems().get(3).setItemSelected(Hawk.get(HawkConfig.LIVE_CROSS_GROUP, false));
         }
+
         int liveGroupIndex = ApiConfig.getLiveGroupIndex();
         LiveSettingGroup lineGroup = findSettingGroupByIndex(5);
-        if (lineGroup != null && lineGroup.getLiveSettingItems() != null && liveGroupIndex >= 0 && liveGroupIndex < lineGroup.getLiveSettingItems().size())
+        if (lineGroup != null && lineGroup.getLiveSettingItems() != null
+                && liveGroupIndex >= 0 && liveGroupIndex < lineGroup.getLiveSettingItems().size())
             lineGroup.getLiveSettingItems().get(liveGroupIndex).setItemSelected(true);
 
         LiveSettingGroup sourceGroup = new LiveSettingGroup();
@@ -4338,7 +4367,6 @@ public class LivePlayActivity extends BaseActivity {
             mHandler.post(mUpdateTimeRun);
             if (tvTime != null) {
                 tvTime.setVisibility(View.VISIBLE);
-                // ★ 新增：根据保存的位置应用显示方位
                 applyOverlayPosition(tvTime, Hawk.get(KEY_LIVE_TIME_POSITION, 0));
             }
         } else {
@@ -4362,7 +4390,6 @@ public class LivePlayActivity extends BaseActivity {
             mHandler.post(mUpdateNetSpeedRun);
             if (tvNetSpeed != null) {
                 tvNetSpeed.setVisibility(View.VISIBLE);
-                // ★ 新增：根据保存的位置应用显示方位
                 applyOverlayPosition(tvNetSpeed, Hawk.get(KEY_LIVE_NET_SPEED_POSITION, 0));
             }
         } else if (tvNetSpeed != null) {
@@ -4431,7 +4458,6 @@ public class LivePlayActivity extends BaseActivity {
         EpgManager.getInstance(this).preloadGroupResources(names, () -> {
             if (liveChannelItemAdapter != null && groupIndex == currentChannelGroupIndex) {
                 liveChannelItemAdapter.notifyDataSetChanged();
-                // ★ 新增：EPG 资源预加载完成后再填充一次节目信息到频道名称下
                 loadGroupChannelsEpgPreview(groupIndex);
             }
             if (ku9GuideChannelAdapter != null && ku9GuideShowing && groupIndex == currentChannelGroupIndex) {
@@ -4456,7 +4482,6 @@ public class LivePlayActivity extends BaseActivity {
         List<LiveChannelItem> channels = getLiveChannels(groupIndex);
         if (liveChannelItemAdapter != null) liveChannelItemAdapter.setNewData(channels != null ? channels : new ArrayList<>());
         preloadCurrentGroupEpgResources(groupIndex);
-        // ★ 新增：点击/悬停分组时同步把 EPG 节目信息加载到频道名称下方
         loadGroupChannelsEpgPreview(groupIndex);
         if (mLiveChannelView != null) {
             if (groupIndex == currentChannelGroupIndex && currentLiveChannelIndex > -1) {
@@ -4469,11 +4494,6 @@ public class LivePlayActivity extends BaseActivity {
         }
     }
 
-    /**
-     * ★ 新增：为指定分组下的所有频道批量加载 EPG 节目信息，显示在频道名称下方。
-     * 优先从 EpgManager 内存缓存读取；若为空，再回退到本地数据库缓存。
-     * 若 EPG 数据尚未就绪（异步下载中），预加载完成回调会再次触发本方法。
-     */
     private void loadGroupChannelsEpgPreview(int groupIndex) {
         if (liveChannelItemAdapter == null) return;
         final List<LiveChannelItem> channels = getLiveChannels(groupIndex);
@@ -4491,7 +4511,6 @@ public class LivePlayActivity extends BaseActivity {
                 if (item == null || TextUtils.isEmpty(item.getChannelName())) continue;
                 final String channelName = item.getChannelName();
                 String title = null, desc = "";
-                // 1) 优先取 EpgManager 内存缓存（XML EPG / 已下载过的频道）
                 try {
                     EpgManager.EpgProgram program = manager.getCurrentProgram(channelName);
                     if (program == null) program = manager.getNextProgram(channelName);
@@ -4501,7 +4520,6 @@ public class LivePlayActivity extends BaseActivity {
                         desc = program.description == null ? "" : program.description;
                     }
                 } catch (Throwable ignored) { }
-                // 2) 回退到本地数据库缓存
                 if (TextUtils.isEmpty(title)) {
                     try {
                         ArrayList<Epginfo> list = EpgUtil.loadEpgData(channelName, dateStr, today);
