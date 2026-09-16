@@ -4106,9 +4106,15 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private int getDefaultSettingGroupIndex() {
-        if (liveSettingGroupList != null && !liveSettingGroupList.isEmpty()
-                && liveSettingGroupList.get(0) != null) {
-            return liveSettingGroupList.get(0).getGroupIndex();
+        if (liveSettingGroupList != null && !liveSettingGroupList.isEmpty()) {
+            // 优先选 0 号分组（直播源）
+            for (LiveSettingGroup g : liveSettingGroupList) {
+                if (g != null && g.getGroupIndex() == 0) return 0;
+            }
+            // 退而求其次：返回列表里第一个有效分组
+            for (LiveSettingGroup g : liveSettingGroupList) {
+                if (g != null) return g.getGroupIndex();
+            }
         }
         return 0;
     }
@@ -4130,13 +4136,23 @@ public class LivePlayActivity extends BaseActivity {
             }
         }
 
-        if (liveSettingGroupList.isEmpty()) {
+        // ★ 逐个检查 0~6，缺哪个补哪个（不再依赖 isEmpty 判断）
+        boolean has0 = findSettingGroupByIndex(0) != null;
+        boolean has1 = findSettingGroupByIndex(1) != null;
+        boolean has2 = findSettingGroupByIndex(2) != null;
+        boolean has3 = findSettingGroupByIndex(3) != null;
+        boolean has4 = findSettingGroupByIndex(4) != null;
+        boolean has5 = findSettingGroupByIndex(5) != null;
+        boolean has6 = findSettingGroupByIndex(6) != null;
+
+        if (!has0) {
             LiveSettingGroup g0 = new LiveSettingGroup();
             g0.setGroupIndex(0);
             g0.setGroupName("直播源");
             g0.setLiveSettingItems(new ArrayList<LiveSettingItem>());
             liveSettingGroupList.add(g0);
-
+        }
+        if (!has1) {
             LiveSettingGroup g1 = new LiveSettingGroup();
             g1.setGroupIndex(1);
             g1.setGroupName("画面比例");
@@ -4150,7 +4166,8 @@ public class LivePlayActivity extends BaseActivity {
             }
             g1.setLiveSettingItems(scaleItems);
             liveSettingGroupList.add(g1);
-
+        }
+        if (!has2) {
             LiveSettingGroup g2 = new LiveSettingGroup();
             g2.setGroupIndex(2);
             g2.setGroupName("播放器");
@@ -4164,7 +4181,8 @@ public class LivePlayActivity extends BaseActivity {
             }
             g2.setLiveSettingItems(playerItems);
             liveSettingGroupList.add(g2);
-
+        }
+        if (!has3) {
             LiveSettingGroup g3 = new LiveSettingGroup();
             g3.setGroupIndex(3);
             g3.setGroupName("连接超时");
@@ -4177,7 +4195,8 @@ public class LivePlayActivity extends BaseActivity {
             }
             g3.setLiveSettingItems(timeoutItems);
             liveSettingGroupList.add(g3);
-
+        }
+        if (!has4) {
             LiveSettingGroup g4 = new LiveSettingGroup();
             g4.setGroupIndex(4);
             g4.setGroupName("显示设置");
@@ -4188,13 +4207,15 @@ public class LivePlayActivity extends BaseActivity {
             LiveSettingItem d3 = new LiveSettingItem(); d3.setItemIndex(3); d3.setItemName("跨组切换"); displayItems.add(d3);
             g4.setLiveSettingItems(displayItems);
             liveSettingGroupList.add(g4);
-
+        }
+        if (!has5) {
             LiveSettingGroup g5 = new LiveSettingGroup();
             g5.setGroupIndex(5);
             g5.setGroupName("直播线路");
             g5.setLiveSettingItems(new ArrayList<LiveSettingItem>());
             liveSettingGroupList.add(g5);
-
+        }
+        if (!has6) {
             LiveSettingGroup g6 = new LiveSettingGroup();
             g6.setGroupIndex(6);
             g6.setGroupName("直播历史");
