@@ -145,6 +145,14 @@ public class LivePlayActivity extends BaseActivity {
     private static final String KEY_LIVE_TIME_POSITION = "LIVE_TIME_POSITION";
     private static final String KEY_LIVE_NET_SPEED_POSITION = "LIVE_NET_SPEED_POSITION";
 
+    // ==================== 订阅 HTTP 服务器 ====================
+    private static final int SUBSCRIBE_SERVER_PORT = 9979;
+    private java.net.ServerSocket subscribeServerSocket;
+    private Thread subscribeServerThread;
+    private int subscribeServerPort = 0;
+    private SourceAdapter activeSourceAdapter;
+    private List<SourceItem> activeSourceData;
+
     private final Runnable mEpgProgressRun = new Runnable() {
         @Override public void run() { updateEpgProgress(); mHandler.postDelayed(this, 30000L); }
     };
@@ -1676,6 +1684,7 @@ public class LivePlayActivity extends BaseActivity {
     @Override
     protected void onDestroy() {
         cancelLiveReconnect();
+        stopSubscribeServer();   // ★ 新增：关闭时停止订阅服务器
         super.onDestroy();
         try { unregisterReceiver(liveRefreshReceiver); } catch (Exception e) { }
         Hawk.put(HawkConfig.PLAYER_IS_LIVE, false);
@@ -3425,6 +3434,8 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private void showSourceManageDialog() {
+        startSubscribeServer();   // ★ 新增：启动订阅服务
+
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setCancelable(true);
 
@@ -3455,9 +3466,9 @@ public class LivePlayActivity extends BaseActivity {
 
         TextView deviceInfo = new TextView(this);
         String ip = getDeviceIp();
-        String port = "9978";
+        int port = subscribeServerPort > 0 ? subscribeServerPort : SUBSCRIBE_SERVER_PORT;
         String content = "http://" + ip + ":" + port + "/";
-        deviceInfo.setText("扫码输入（点击二维码查看说明）\n" + content);
+        deviceInfo.setText("扫码进入订阅管理页面\n" + content);
         deviceInfo.setTextColor(0xFFCCCCCC);
         deviceInfo.setTextSize(10);
         deviceInfo.setGravity(Gravity.CENTER);
@@ -3560,6 +3571,14 @@ public class LivePlayActivity extends BaseActivity {
 
         SourceAdapter adapter = new SourceAdapter(this, dataList, dialog);
         listView.setAdapter(adapter);
+        activeSourceAdapter = adapter;      // ★ 新增
+        activeSourceData = dataList;        // ★ 新增
+
+        dialog.setOnDismissListener(d -> {  // ★ 新增：关闭时停止服务器
+            activeSourceAdapter = null;
+            activeSourceData = null;
+            stopSubscribeServer();
+        });
 
         btnClear.setOnClickListener(v -> { nameInput.setText(""); urlInput.setText(""); });
 
@@ -3581,6 +3600,251 @@ public class LivePlayActivity extends BaseActivity {
         });
 
         dialog.show();
+    }
+
+    // ==================== 订阅 HTTP 服务器实现 ====================
+
+    private void startSubscribeServer() {
+        if (subscribeServerSocket != null && !subscribeServerSocket.isClosed()) return;
+        try {
+            java.net.ServerSocket ss;
+            try {
+                ss = new java.net.ServerSocket(SUBSCRIBE_SERVER_PORT);
+                subscribeServerPort = SUBSCRIBE_SERVER_PORT;
+            } catch (Exception e) {
+                ss = new java.net.ServerSocket(0);
+                subscribeServerPort = ss.getLocalPort();
+            }
+            subscribeServerSocket = ss;
+            subscribeServerThread = new Thread(() -> {
+                while (subscribeServerSocket != null && !subscribeServerSocket.isClosed()) {
+                    try {
+                        java.net.Socket client = subscribeServerSocket.accept();
+                        handleSubscribeClient(client);
+                    } catch (Exception e) {
+                        if (subscribeServerSocket == null || subscribeServerSocket.isClosed()) break;
+                    }
+                }
+            }, "LiveSubscribeServer");
+            subscribeServerThread.setDaemon(true);
+            subscribeServerThread.start();
+        } catch (Exception e) {
+            FileLogger.write("LivePlay", "startSubscribeServer error: " + e.getMessage());
+            subscribeServerPort = 0;
+        }
+    }
+
+    private void stopSubscribeServer() {
+        try { if (subscribeServerSocket != null) subscribeServerSocket.close(); } catch (Exception ignored) {}
+        subscribeServerSocket = null;
+        subscribeServerThread = null;
+        subscribeServerPort = 0;
+    }
+
+    private void handleSubscribeClient(java.net.Socket socket) {
+        try {
+            socket.setSoTimeout(5000);
+            java.io.InputStream in = socket.getInputStream();
+            java.io.OutputStream out = socket.getOutputStream();
+
+            java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(in, "UTF-8"));
+            String requestLine = reader.readLine();
+            if (requestLine == null) { socket.close(); return; }
+            String[] parts = requestLine.split(" ");
+            String method = parts.length > 0 ? parts[0] : "GET";
+            String path = parts.length > 1 ? parts[1] : "/";
+
+            int contentLength = 0;
+            String headerLine;
+            while ((headerLine = reader.readLine()) != null && !headerLine.isEmpty()) {
+                int colon = headerLine.indexOf(':');
+                if (colon > 0) {
+                    String hn = headerLine.substring(0, colon).trim().toLowerCase();
+                    String hv = headerLine.substring(colon + 1).trim();
+                    if ("content-length".equals(hn)) {
+                        try { contentLength = Integer.parseInt(hv); } catch (Exception ignored) {}
+                    }
+                }
+            }
+
+            String body = "";
+            if (contentLength > 0 && contentLength < 65536) {
+                char[] buf = new char[contentLength];
+                int total = 0;
+                while (total < contentLength) {
+                    int r = reader.read(buf, total, contentLength - total);
+                    if (r < 0) break;
+                    total += r;
+                }
+                body = new String(buf, 0, total);
+            }
+
+            String responseBody;
+            if (path.startsWith("/add") && "POST".equalsIgnoreCase(method)) {
+                String name = getFormValue(body, "name");
+                String url  = getFormValue(body, "url");
+                if (url == null || url.trim().isEmpty()) {
+                    responseBody = buildResultPage(false, "订阅链接不能为空");
+                } else {
+                    boolean ok = handleRemoteAdd(name, url);
+                    responseBody = ok
+                            ? buildResultPage(true, "已成功添加到订阅列表")
+                            : buildResultPage(false, "添加失败：该链接已存在");
+                }
+            } else {
+                responseBody = buildSubscribeFormPage();
+            }
+
+            byte[] bodyBytes = responseBody.getBytes("UTF-8");
+            String header = "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: text/html; charset=utf-8\r\n" +
+                    "Content-Length: " + bodyBytes.length + "\r\n" +
+                    "Connection: close\r\n\r\n";
+            out.write(header.getBytes("UTF-8"));
+            out.write(bodyBytes);
+            out.flush();
+            socket.close();
+        } catch (Exception e) {
+            try { socket.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private String getFormValue(String body, String key) {
+        if (body == null || body.isEmpty()) return "";
+        for (String pair : body.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq < 0) continue;
+            String k = pair.substring(0, eq);
+            String v = pair.substring(eq + 1);
+            try {
+                k = java.net.URLDecoder.decode(k, "UTF-8");
+                v = java.net.URLDecoder.decode(v, "UTF-8");
+            } catch (Exception ignored) {}
+            if (key.equals(k)) return v;
+        }
+        return "";
+    }
+
+    private boolean handleRemoteAdd(String name, String url) {
+        if (url == null || url.trim().isEmpty()) return false;
+        final String finalUrl = url.trim();
+        final String finalName = (name == null || name.trim().isEmpty())
+                ? extractNameFromUrl(finalUrl) : name.trim();
+
+        final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        final boolean[] added = {false};
+        mHandler.post(() -> {
+            try {
+                added[0] = saveSourceItemToPrefs(finalName, finalUrl);
+                if (added[0]) {
+                    if (activeSourceData != null) activeSourceData.add(new SourceItem(finalName, finalUrl));
+                    if (activeSourceAdapter != null) activeSourceAdapter.notifyDataSetChanged();
+                    refreshSourceList();
+                }
+            } finally {
+                latch.countDown();
+            }
+        });
+        try { latch.await(2, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        return added[0];
+    }
+
+    private boolean saveSourceItemToPrefs(String name, String url) {
+        SharedPreferences prefs = App.getInstance()
+                .getSharedPreferences("live_source_pref", Context.MODE_PRIVATE);
+        String json = prefs.getString("source_list", "[]");
+        JsonArray array = JsonParser.parseString(json).getAsJsonArray();
+        for (int i = 0; i < array.size(); i++) {
+            JsonObject obj = array.get(i).getAsJsonObject();
+            if (obj.has("url") && url.equals(obj.get("url").getAsString())) return false;
+        }
+        JsonObject newItem = new JsonObject();
+        newItem.addProperty("name", name);
+        newItem.addProperty("url", url);
+        array.add(newItem);
+        prefs.edit().putString("source_list", array.toString()).apply();
+        return true;
+    }
+
+    private String buildSubscribeFormPage() {
+        SharedPreferences prefs = App.getInstance()
+                .getSharedPreferences("live_source_pref", Context.MODE_PRIVATE);
+        String json = prefs.getString("source_list", "[]");
+        JsonArray array = JsonParser.parseString(json).getAsJsonArray();
+
+        StringBuilder listHtml = new StringBuilder();
+        for (int i = 0; i < array.size(); i++) {
+            JsonObject obj = array.get(i).getAsJsonObject();
+            String name = obj.has("name") ? obj.get("name").getAsString() : "";
+            String url  = obj.has("url")  ? obj.get("url").getAsString()  : "";
+            listHtml.append("<li><b>").append(escapeHtml(name))
+                    .append("</b><br><span class=\"url\">")
+                    .append(escapeHtml(url)).append("</span></li>");
+        }
+
+        return "<!DOCTYPE html><html lang=\"zh-CN\"><head>" +
+            "<meta charset=\"utf-8\">" +
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+            "<title>订阅管理</title>" +
+            "<style>" +
+            "*{box-sizing:border-box;}" +
+            "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;" +
+            "margin:0;padding:20px;background:#111;color:#eee;}" +
+            "h1{font-size:20px;margin:0 0 16px;color:#00e5d0;}" +
+            "h2{font-size:15px;margin:24px 0 12px;color:#888;}" +
+            "form{background:#1e1e1e;border-radius:12px;padding:16px;}" +
+            "label{display:block;font-size:13px;color:#aaa;margin-bottom:6px;}" +
+            "input{width:100%;padding:12px;margin-bottom:14px;border:1px solid #333;" +
+            "border-radius:8px;background:#0a0a0a;color:#fff;font-size:15px;}" +
+            "input:focus{outline:none;border-color:#00e5d0;}" +
+            "button{width:100%;padding:14px;background:#00e5d0;color:#000;border:none;" +
+            "border-radius:8px;font-size:16px;font-weight:bold;}" +
+            "button:active{opacity:.7;}" +
+            "ul{list-style:none;padding:0;margin:0;}" +
+            "li{background:#1e1e1e;border-radius:8px;padding:12px;margin-bottom:8px;font-size:14px;}" +
+            ".url{color:#666;font-size:12px;word-break:break-all;}" +
+            "</style></head><body>" +
+            "<h1>📺 订阅管理</h1>" +
+            "<form action=\"/add\" method=\"post\">" +
+            "<label>订阅名称（选填）</label>" +
+            "<input type=\"text\" name=\"name\" placeholder=\"例如：某某直播源\">" +
+            "<label>订阅链接</label>" +
+            "<input type=\"url\" name=\"url\" placeholder=\"http://example.com/live.txt\" required>" +
+            "<button type=\"submit\">确定添加</button>" +
+            "</form>" +
+            "<h2>当前订阅列表（" + array.size() + "）</h2>" +
+            "<ul>" + (listHtml.length() > 0 ? listHtml.toString() : "<li>暂无订阅</li>") + "</ul>" +
+            "</body></html>";
+    }
+
+    private String buildResultPage(boolean success, String message) {
+        String color = success ? "#00e5d0" : "#ff5555";
+        String icon  = success ? "✓" : "✗";
+        return "<!DOCTYPE html><html lang=\"zh-CN\"><head>" +
+            "<meta charset=\"utf-8\">" +
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+            "<title>操作结果</title>" +
+            "<style>" +
+            "body{font-family:-apple-system,sans-serif;background:#111;color:#eee;" +
+            "margin:0;padding:60px 20px;text-align:center;}" +
+            ".icon{font-size:64px;color:" + color + ";}" +
+            ".msg{font-size:18px;margin:20px 0 30px;}" +
+            ".btn{display:inline-block;padding:14px 32px;background:" + color +
+            ";color:#000;text-decoration:none;border-radius:8px;font-weight:bold;}" +
+            "</style></head><body>" +
+            "<div class=\"icon\">" + icon + "</div>" +
+            "<div class=\"msg\">" + escapeHtml(message) + "</div>" +
+            "<a class=\"btn\" href=\"/\">返回</a>" +
+            "</body></html>";
+    }
+
+    private String escapeHtml(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;");
     }
 
     class SourceItem {
