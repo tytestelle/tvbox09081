@@ -1551,6 +1551,71 @@ public class LivePlayActivity extends BaseActivity {
     private Runnable mLongPressRunnable;
     private static final long LONG_PRESS_DELAY = 800;
 
+    /**
+     * 判断焦点当前是否落在偏好设置面板内部（分组或选项列表）
+     */
+    private boolean isFocusInSettingPanel() {
+        if (tvRightSettingLayout == null || tvRightSettingLayout.getVisibility() != View.VISIBLE) return false;
+        View focused = getCurrentFocus();
+        if (focused == null) return false;
+        return (mSettingGroupView != null && isChildOf(mSettingGroupView, focused))
+                || (mSettingItemView != null && isChildOf(mSettingItemView, focused));
+    }
+
+    /**
+     * 当偏好设置面板打开但焦点不在面板内时，把焦点抢回分组列表
+     */
+    private boolean ensureSettingPanelFocus() {
+        if (tvRightSettingLayout == null || tvRightSettingLayout.getVisibility() != View.VISIBLE) return false;
+        if (isFocusInSettingPanel()) return false;
+        int pos = 0;
+        if (liveSettingGroupAdapter != null) {
+            int g = liveSettingGroupAdapter.getSelectedGroupIndex();
+            int p = liveSettingGroupAdapter.findPositionByGroupIndex(g);
+            if (p >= 0) pos = p;
+        }
+        requestRecyclerItemFocus(mSettingGroupView, pos, 0);
+        return true;
+    }
+
+    /**
+     * 设置面板内方向键处理：
+     * 左右在分组与选项两栏之间切换；上下由 RecyclerView 自行处理。
+     * 返回 true 表示已消费。
+     */
+    private boolean handleSettingPanelKeyDown(int keyCode) {
+        if (tvRightSettingLayout == null || tvRightSettingLayout.getVisibility() != View.VISIBLE) return false;
+        View focused = getCurrentFocus();
+        if (focused == null) { ensureSettingPanelFocus(); return true; }
+
+        boolean focusInGroup = mSettingGroupView != null && isChildOf(mSettingGroupView, focused);
+        boolean focusInItem = mSettingItemView != null && isChildOf(mSettingItemView, focused);
+
+        if (!focusInGroup && !focusInItem) {
+            ensureSettingPanelFocus();
+            return true;
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && focusInGroup) {
+            int pos = liveSettingItemAdapter != null ? liveSettingItemAdapter.getSelectedItemIndex() : 0;
+            if (pos < 0) pos = 0;
+            requestRecyclerItemFocus(mSettingItemView, pos, 0);
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && focusInItem) {
+            int pos = 0;
+            if (liveSettingGroupAdapter != null) {
+                int g = liveSettingGroupAdapter.getSelectedGroupIndex();
+                int p = liveSettingGroupAdapter.findPositionByGroupIndex(g);
+                if (p >= 0) pos = p;
+            }
+            requestRecyclerItemFocus(mSettingGroupView, pos, 0);
+            return true;
+        }
+        // 上下键或其他键放行，让 RecyclerView 自身处理
+        return false;
+    }
+
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         int keyCode = event.getKeyCode();
@@ -1609,6 +1674,14 @@ public class LivePlayActivity extends BaseActivity {
                     return true;
                 }
             }
+            // ★ 新增：偏好设置面板内，方向键的上下由 RecyclerView 自行处理，左右由这里接管
+            if (tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.VISIBLE) {
+                if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
+                    // 保持原有返回逻辑
+                } else {
+                    if (handleSettingPanelKeyDown(keyCode)) return true;
+                }
+            }
             if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_INFO || keyCode == KeyEvent.KEYCODE_HELP) showSettingGroup();
             else if (!isListOrSettingLayoutVisible()) {
                 switch (keyCode) {
@@ -1648,7 +1721,11 @@ public class LivePlayActivity extends BaseActivity {
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if ((keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) && event.getRepeatCount() == 0) {
+        // ★ 修改：偏好设置面板可见时，不挂长按监听器，避免在面板里按 OK 又弹一次设置面板
+        boolean settingVisible = tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.VISIBLE;
+        if (!settingVisible
+                && (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+                && event.getRepeatCount() == 0) {
             mLongPressRunnable = () -> showSettingGroup();
             mmHandler.postDelayed(mLongPressRunnable, LONG_PRESS_DELAY);
         }
@@ -2196,6 +2273,10 @@ public class LivePlayActivity extends BaseActivity {
         }
     }
 
+    /**
+     * ★ 修复版：面板滑出后，使用带重试的 requestRecyclerItemFocus 请求焦点，
+     *   避免子项未完成布局导致 holder 为 null 时焦点丢失。
+     */
     private Runnable mFocusAndShowSettingGroup = new Runnable() {
         @Override public void run() {
             if ((mSettingGroupView != null && mSettingGroupView.isScrolling())
@@ -2205,11 +2286,17 @@ public class LivePlayActivity extends BaseActivity {
                 mHandler.postDelayed(this, 100);
             } else {
                 int settingGroupIndex = getDefaultSettingGroupIndex();
-                int settingGroupPosition = liveSettingGroupAdapter != null ? liveSettingGroupAdapter.findPositionByGroupIndex(settingGroupIndex) : 0;
+                int settingGroupPosition = liveSettingGroupAdapter != null
+                        ? liveSettingGroupAdapter.findPositionByGroupIndex(settingGroupIndex) : 0;
+                if (settingGroupPosition < 0) settingGroupPosition = 0;
+
+                // ★ 使用带重试的聚焦方法
                 if (mSettingGroupView != null) {
-                    RecyclerView.ViewHolder holder = mSettingGroupView.findViewHolderForAdapterPosition(settingGroupPosition < 0 ? 0 : settingGroupPosition);
-                    if (holder != null) holder.itemView.requestFocus();
+                    mSettingGroupView.scrollToPosition(settingGroupPosition);
+                    mSettingGroupView.setSelection(settingGroupPosition);
+                    requestRecyclerItemFocus(mSettingGroupView, settingGroupPosition, 0);
                 }
+
                 if (tvRightSettingLayout != null) tvRightSettingLayout.bringToFront();
                 if (tvRightSettingLayout != null) tvRightSettingLayout.setVisibility(View.VISIBLE);
                 if (tvRightSettingLayout != null) {
@@ -2218,7 +2305,12 @@ public class LivePlayActivity extends BaseActivity {
                     ObjectAnimator animator = ObjectAnimator.ofObject(viewObj, "marginRight", new IntEvaluator(), -tvRightSettingLayout.getLayoutParams().width, livePanelEdgeMargin());
                     animator.setDuration(200);
                     animator.addListener(new AnimatorListenerAdapter() {
-                        @Override public void onAnimationEnd(Animator animation) { super.onAnimationEnd(animation); mHandler.postDelayed(mHideSettingLayoutRun, postTimeout); }
+                        @Override public void onAnimationEnd(Animator animation) {
+                            super.onAnimationEnd(animation);
+                            // 动画结束后再确认一次焦点
+                            requestRecyclerItemFocus(mSettingGroupView, Math.max(0, mSettingGroupView != null ? mSettingGroupView.getSelectedPosition() : 0), 0);
+                            mHandler.postDelayed(mHideSettingLayoutRun, postTimeout);
+                        }
                     });
                     animator.start();
                 }
