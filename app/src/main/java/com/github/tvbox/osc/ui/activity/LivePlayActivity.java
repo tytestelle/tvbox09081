@@ -1674,7 +1674,7 @@ public class LivePlayActivity extends BaseActivity {
                     return true;
                 }
             }
-            // ★ 新增：偏好设置面板内，方向键的上下由 RecyclerView 自行处理，左右由这里接管
+            // 偏好设置面板内，方向键的上下由 RecyclerView 自行处理，左右由这里接管
             if (tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.VISIBLE) {
                 if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
                     // 保持原有返回逻辑
@@ -1721,7 +1721,7 @@ public class LivePlayActivity extends BaseActivity {
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        // ★ 修改：偏好设置面板可见时，不挂长按监听器，避免在面板里按 OK 又弹一次设置面板
+        // 偏好设置面板可见时，不挂长按监听器，避免在面板里按 OK 又弹一次设置面板
         boolean settingVisible = tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.VISIBLE;
         if (!settingVisible
                 && (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
@@ -1761,7 +1761,7 @@ public class LivePlayActivity extends BaseActivity {
     @Override
     protected void onDestroy() {
         cancelLiveReconnect();
-        stopSubscribeServer();   // ★ 新增：关闭时停止订阅服务器
+        stopSubscribeServer();   // 关闭时停止订阅服务器
         super.onDestroy();
         try { unregisterReceiver(liveRefreshReceiver); } catch (Exception e) { }
         Hawk.put(HawkConfig.PLAYER_IS_LIVE, false);
@@ -2274,8 +2274,8 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     /**
-     * ★ 修复版：面板滑出后，使用带重试的 requestRecyclerItemFocus 请求焦点，
-     *   避免子项未完成布局导致 holder 为 null 时焦点丢失。
+     * 面板滑出后，使用带重试的 requestRecyclerItemFocus 请求焦点，
+     * 避免子项未完成布局导致 holder 为 null 时焦点丢失。
      */
     private Runnable mFocusAndShowSettingGroup = new Runnable() {
         @Override public void run() {
@@ -2290,7 +2290,7 @@ public class LivePlayActivity extends BaseActivity {
                         ? liveSettingGroupAdapter.findPositionByGroupIndex(settingGroupIndex) : 0;
                 if (settingGroupPosition < 0) settingGroupPosition = 0;
 
-                // ★ 使用带重试的聚焦方法
+                // 使用带重试的聚焦方法
                 if (mSettingGroupView != null) {
                     mSettingGroupView.scrollToPosition(settingGroupPosition);
                     mSettingGroupView.setSelection(settingGroupPosition);
@@ -3433,32 +3433,39 @@ public class LivePlayActivity extends BaseActivity {
         titleView.setPadding(0, 0, 0, dp(14));
         container.addView(titleView);
 
+        // 参与方向键导航的所有视图
+        final List<View> navViews = new ArrayList<>();
+
         for (int i = 0; i < options.length; i++) {
             final int index = i;
-            boolean selected = (i == checked);
+            final boolean isSelected = (i == checked);
 
             TextView option = new TextView(this);
             option.setText(options[i]);
             option.setTextSize(15);
             option.setGravity(Gravity.CENTER);
-            option.setTextColor(selected ? 0xFF00E5D0 : 0xFFCCCCCC);
-
-            android.graphics.drawable.GradientDrawable itemBg = new android.graphics.drawable.GradientDrawable();
-            itemBg.setColor(selected ? 0x3300E5D0 : 0x33FFFFFF);
-            itemBg.setCornerRadius(dp(8));
-            itemBg.setStroke(dp(1), selected ? 0x6600E5D0 : 0x22FFFFFF);
-            option.setBackground(itemBg);
+            // 让 TextView 可聚焦，遥控器才能把焦点放上去
+            option.setFocusable(true);
+            option.setFocusableInTouchMode(true);
+            option.setClickable(true);
 
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, dp(46));
             lp.bottomMargin = dp(8);
             option.setLayoutParams(lp);
 
+            applyDialogOptionStyle(option, isSelected, false);
+
+            option.setOnFocusChangeListener((v, hasFocus) ->
+                    applyDialogOptionStyle(option, isSelected, hasFocus));
+
             option.setOnClickListener(v -> {
                 dialog.dismiss();
                 if (index == 0) callback.onResult(false, 0);
                 else callback.onResult(true, index - 1);
             });
+
+            navViews.add(option);
             container.addView(option);
         }
 
@@ -3466,17 +3473,34 @@ public class LivePlayActivity extends BaseActivity {
         cancel.setText("取消");
         cancel.setTextSize(14);
         cancel.setGravity(Gravity.CENTER);
-        cancel.setTextColor(0xFFAAAAAA);
-        android.graphics.drawable.GradientDrawable cancelBg = new android.graphics.drawable.GradientDrawable();
-        cancelBg.setColor(0x33FFFFFF);
-        cancelBg.setCornerRadius(dp(8));
-        cancel.setBackground(cancelBg);
+        cancel.setFocusable(true);
+        cancel.setFocusableInTouchMode(true);
+        cancel.setClickable(true);
         LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(42));
         cancelLp.topMargin = dp(4);
         cancel.setLayoutParams(cancelLp);
+        applyDialogCancelStyle(cancel, false);
+        cancel.setOnFocusChangeListener((v, hasFocus) -> applyDialogCancelStyle(cancel, hasFocus));
         cancel.setOnClickListener(v -> dialog.dismiss());
+        navViews.add(cancel);
         container.addView(cancel);
+
+        // 上下方向键在选项之间移动焦点
+        for (int i = 0; i < navViews.size(); i++) {
+            final int idx = i;
+            navViews.get(i).setOnKeyListener((v, keyCode, event) -> {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                int next = -1;
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) next = idx + 1;
+                else if (keyCode == KeyEvent.KEYCODE_DPAD_UP) next = idx - 1;
+                if (next >= 0 && next < navViews.size()) {
+                    navViews.get(next).requestFocus();
+                    return true;
+                }
+                return false;
+            });
+        }
 
         dialog.setContentView(container);
         if (dialog.getWindow() != null) {
@@ -3487,7 +3511,53 @@ public class LivePlayActivity extends BaseActivity {
             wlp.height = android.view.WindowManager.LayoutParams.WRAP_CONTENT;
             dialog.getWindow().setAttributes(wlp);
         }
+
+        // 对话框显示后把焦点落到当前选中项
+        dialog.setOnShowListener(d -> {
+            if (checked >= 0 && checked < navViews.size()) navViews.get(checked).requestFocus();
+        });
+
         dialog.show();
+    }
+
+    /** 选项样式：普通 / 已选中 / 获得焦点 三种状态 */
+    private void applyDialogOptionStyle(TextView option, boolean selected, boolean focused) {
+        int textColor;
+        int bgColor;
+        int strokeColor;
+        if (focused) {
+            textColor = 0xFF000000;
+            bgColor = 0xFF00E5D0;
+            strokeColor = 0xFFFFD54F;
+        } else if (selected) {
+            textColor = 0xFF00E5D0;
+            bgColor = 0x3300E5D0;
+            strokeColor = 0x6600E5D0;
+        } else {
+            textColor = 0xFFCCCCCC;
+            bgColor = 0x33FFFFFF;
+            strokeColor = 0x22FFFFFF;
+        }
+        option.setTextColor(textColor);
+        android.graphics.drawable.GradientDrawable itemBg = new android.graphics.drawable.GradientDrawable();
+        itemBg.setColor(bgColor);
+        itemBg.setCornerRadius(dp(8));
+        itemBg.setStroke(dp(1), strokeColor);
+        option.setBackground(itemBg);
+    }
+
+    /** 取消按钮样式 */
+    private void applyDialogCancelStyle(TextView cancel, boolean focused) {
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setCornerRadius(dp(8));
+        if (focused) {
+            cancel.setTextColor(0xFF000000);
+            bg.setColor(0xFF00E5D0);
+        } else {
+            cancel.setTextColor(0xFFAAAAAA);
+            bg.setColor(0x33FFFFFF);
+        }
+        cancel.setBackground(bg);
     }
 
     private interface DisplayPositionCallback {
@@ -3526,7 +3596,7 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private void showSourceManageDialog() {
-        startSubscribeServer();   // ★ 新增：启动订阅服务
+        startSubscribeServer();
 
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setCancelable(true);
@@ -3663,10 +3733,10 @@ public class LivePlayActivity extends BaseActivity {
 
         SourceAdapter adapter = new SourceAdapter(this, dataList, dialog);
         listView.setAdapter(adapter);
-        activeSourceAdapter = adapter;      // ★ 新增
-        activeSourceData = dataList;        // ★ 新增
+        activeSourceAdapter = adapter;
+        activeSourceData = dataList;
 
-        dialog.setOnDismissListener(d -> {  // ★ 新增：关闭时停止服务器
+        dialog.setOnDismissListener(d -> {  // 关闭时停止服务器
             activeSourceAdapter = null;
             activeSourceData = null;
             stopSubscribeServer();
@@ -4492,7 +4562,7 @@ public class LivePlayActivity extends BaseActivity {
             }
         }
 
-        // ★ 逐个检查 0~6，缺哪个补哪个（不再依赖 isEmpty 判断）
+        // 逐个检查 0~6，缺哪个补哪个（不再依赖 isEmpty 判断）
         boolean has0 = findSettingGroupByIndex(0) != null;
         boolean has1 = findSettingGroupByIndex(1) != null;
         boolean has2 = findSettingGroupByIndex(2) != null;
