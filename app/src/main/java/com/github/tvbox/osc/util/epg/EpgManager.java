@@ -65,25 +65,17 @@ import okhttp3.Response;
  *   4) 全部失败 → 返回 null，调用方不显示台标
  *
  * EPG ID 解析策略（按优先级）：
- *   1) assets/epg_data.json 的静态映射（或本地缓存版本，见下）；
- *   2) 运行期回填的动态映射 dynamic_epg_ids.json（等价于把新条目写进
- *      epg_data.json，下次启动直接命中）；
- *   3) 仍未命中时用“候选名”去 XMLTV 的 display-name 里做精确匹配，候选规则：
- *        - 第一个候选：原始频道名称本身
- *        - 若名称以“台”结尾且长度 > 1，追加第二个候选：去掉末尾“台”
- *      任一个候选在 XMLTV 命中，就把 原始频道名 → 该候选 回填到
- *      dynamic_epg_ids.json；
- *   4) 全部未命中 → 视为 XMLTV 中确实没有该频道，不做处理。
+ *   1) assets/epg_data.json 的静态映射（或本地缓存版本）；
+ *   2) 运行期回填的动态映射 dynamic_epg_ids.json；
+ *   3) 仍未命中时用“候选名”去 XMLTV 的 display-name 里做精确匹配；
+ *   4) 全部未命中 → 视为 XMLTV 中确实没有该频道。
  *
- * epg_data.json 远程同步：
- *   优先使用 files/epg_data_cache.json；若不存在，则回退 assets 内置版本。
- *   启动时后台从 GitHub 母版拉取最新数据并原子覆盖缓存，成功后重新加载
- *   映射表。拉取失败或内容未变则不动，保证功能不中断。
- *
- *   【更新逻辑】
- *   远程同步基于 .hash 文件的精确比对：请求 <epg_data-url>.hash，
- *   与本地 epg_data_cache.hash 比较。若不同，则下载新的 epg_data.json
- *   并更新本地哈希记录；若相同，则跳过。不再使用固定 6 小时刷新间隔。
+ * 【本次修复】
+ *   parseXmlForEpgIds 从「清空重建」改为「增量合并」：
+ *     - 每次只解析本次请求的 epgid，解析出的结果合并进已有缓存；
+ *     - 之前已加载的 epgid 数据不会被冲掉；
+ *     - loadedEpgIds 只增不减（除非 XML 文件 hash 变化才整体清空）。
+ *   loadChannelGroup 里的判重从 equals 改为 containsAll。
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -92,28 +84,17 @@ public class EpgManager {
     private static final String HASH_FILE_NAME = "epg.hash";
     private static final String LOGO_DIR_NAME = "logos";
 
-    /**
-     * 运行期回填的 EPG ID 映射，语义上等价于“往 epg_data.json 里补条目”。
-     * assets 里的 epg_data.json 是只读的，无法直接写回，所以用独立文件承载。
-     * 静态映射优先级高于动态映射。
-     */
     private static final String DYNAMIC_EPG_IDS_FILE = "dynamic_epg_ids.json";
 
-    /** GitHub 台标仓库基础地址（与参考实现保持一致）。 */
     private static final String GITHUB_LOGO_BASE_URL =
             "https://raw.githubusercontent.com/tytestelle/logo/main/ico/logo/";
 
-    /** GitHub 仓库 epg_data.json 的远程地址（使用你提供的原始链接）。 */
     private static final String EPG_DATA_REMOTE_URL =
             "https://raw.githubusercontent.com/tytestelle/sandiJMYG/main/epg_data/epg_data.json";
 
-    /** 本地缓存文件名（存储在 filesDir 下，与 assets 内置版本区分）。 */
     private static final String EPG_DATA_CACHE_FILE = "epg_data_cache.json";
-
-    /** 本地 epg_data.json 哈希记录文件。 */
     private static final String EPG_DATA_HASH_FILE = "epg_data_cache.hash";
 
-    /** 分组切换时聚合 EPG 预热的延迟窗口（毫秒）。 */
     private static final long EPG_WARMUP_DELAY_MS = 150L;
 
     private static EpgManager instance;
@@ -157,10 +138,8 @@ public class EpgManager {
     private final Map<String, String> iconUrlByEpgId = new HashMap<>();
     private final Set<String> loadedEpgIds = new HashSet<>();
 
-    // epg_data.json 远程同步状态
     private volatile boolean epgDataRefreshRunning = false;
 
-    // 保留旧的偏好设置键，兼容外部调用，但新的加载链路不再依赖它。
     private static final String LOGO_PREFS = "logo_settings";
     private static final String LOGO_SOURCE_KEY = "xmltv_logo_source";
     public static final String LOGO_SOURCE_EPG = "EPG";
@@ -205,19 +184,13 @@ public class EpgManager {
         epgUrl = normalizeEpgUrl(EpgSettings.getEpgUrl(context));
         if (TextUtils.isEmpty(epgUrl)) loadDefaultEpgUrl();
 
-        loadEpgDataMap();   // 缓存优先，回退 assets
+        loadEpgDataMap();
         loadDynamicEpgIds();
 
-        // 后台尝试从 GitHub 拉取最新母版，不阻塞启动
         refreshEpgDataFromRemote();
     }
 
     // ======================== epg_data.json ========================
-    /**
-     * 加载 epg_data.json。
-     * 优先使用本地缓存 files/epg_data_cache.json（由远程同步写入）；
-     * 缓存不存在或损坏时回退到 assets 内置版本。
-     */
     private void loadEpgDataMap() {
         synchronized (nameToEpgId) {
             nameToEpgId.clear();
@@ -254,7 +227,6 @@ public class EpgManager {
                 FileLogger.write(TAG, "加载 epg_data.json 失败[" +
                         (epgDataCacheFile != null && epgDataCacheFile.exists() ? "缓存" : "assets") +
                         "]，尝试回退 assets", e);
-                // 若缓存损坏，删除缓存并回退 assets
                 if (epgDataCacheFile != null && epgDataCacheFile.exists()) {
                     try { epgDataCacheFile.delete(); } catch (Exception ignored) { }
                     try (InputStream fallback = context.getAssets().open("epg_data.json")) {
@@ -283,12 +255,6 @@ public class EpgManager {
     }
 
     // ======================== epg_data.json 远程同步 ========================
-    /**
-     * 从 GitHub 仓库拉取 epg_data.json 母版，覆盖本地缓存并重新加载映射表。
-     * 更新逻辑：先请求远程 <epg_data-url>.hash，与本地 epg_data_cache.hash 比较。
-     * 若哈希不同（或本地缓存文件不存在），则下载新文件并更新本地哈希；
-     * 若哈希相同，则跳过下载。
-     */
     public void refreshEpgDataFromRemote() {
         if (epgDataRefreshRunning) {
             FileLogger.write(TAG, "epg_data.json 远程同步正在进行中，跳过");
@@ -297,7 +263,6 @@ public class EpgManager {
         epgDataRefreshRunning = true;
         epgExecutor.execute(() -> {
             try {
-                // 1. 获取远程哈希值
                 final String hashUrl = EPG_DATA_REMOTE_URL + ".hash";
                 FileLogger.write(TAG, "epg_data.json 哈希检查开始: hashUrl=" + hashUrl);
                 String remoteHash = fetchRemoteHash(hashUrl);
@@ -306,12 +271,10 @@ public class EpgManager {
                     return;
                 }
 
-                // 2. 读取本地哈希值
                 String localHash = readText(epgDataHashFile);
                 FileLogger.write(TAG, "epg_data.json 哈希比对: remote=" + remoteHash
                         + ", local=" + (TextUtils.isEmpty(localHash) ? "<empty>" : localHash));
 
-                // 3. 哈希相同且本地缓存文件有效 → 无需更新
                 if (remoteHash.equals(localHash)
                         && epgDataCacheFile.exists()
                         && epgDataCacheFile.length() > 0) {
@@ -319,7 +282,6 @@ public class EpgManager {
                     return;
                 }
 
-                // 4. 哈希不同或本地文件不存在 → 下载新文件
                 FileLogger.write(TAG, "epg_data.json 哈希已变化或本地文件不存在，开始下载: "
                         + EPG_DATA_REMOTE_URL);
                 Request request = new Request.Builder()
@@ -338,7 +300,6 @@ public class EpgManager {
                         return;
                     }
 
-                    // 结构校验：能解析成 JSON 且含 epgs 数组才认
                     JsonObject remoteRoot;
                     try {
                         remoteRoot = JsonParser.parseReader(new InputStreamReader(
@@ -353,7 +314,6 @@ public class EpgManager {
                         return;
                     }
 
-                    // 原子写盘：先写临时文件，再重命名覆盖
                     File tmp = new File(context.getFilesDir(), EPG_DATA_CACHE_FILE + ".tmp");
                     try (FileOutputStream out = new FileOutputStream(tmp)) {
                         out.write(data);
@@ -366,16 +326,12 @@ public class EpgManager {
                         tmp.delete();
                     }
 
-                    // 更新本地哈希记录文件
                     writeTextAtomically(epgDataHashFile, remoteHash);
 
                     FileLogger.write(TAG, "远程 epg_data.json 已更新，size=" + data.length
                             + "，hash=" + remoteHash + "，即将重新加载映射");
 
-                    // 重新加载映射表
                     loadEpgDataMap();
-
-                    // 母版更新后，清理已被覆盖的动态回填条目
                     pruneDynamicEpgIds();
                 }
             } catch (Exception e) {
@@ -386,10 +342,6 @@ public class EpgManager {
         });
     }
 
-    /**
-     * 母版更新后清理动态回填表：如果某条 dynamic 映射现在已经被静态表命中，
-     * 说明它已经并入母版，可以从动态表里移除。
-     */
     private void pruneDynamicEpgIds() {
         boolean changed = false;
         synchronized (dynamicEpgIds) {
@@ -460,24 +412,14 @@ public class EpgManager {
         }
     }
 
-    /**
-     * 从频道名推导候选 EPG ID。
-     * 规则（按顺序）：
-     *   ① 原始频道名称本身；
-     *   ② 若名称以“台”结尾且长度 > 1，去掉末尾“台”。
-     *
-     * 仅在 epg_data.json 与 dynamic_epg_ids.json 均未命中时使用。
-     */
     private List<String> deriveEpgIdCandidates(String channelName) {
         List<String> candidates = new ArrayList<>();
         if (TextUtils.isEmpty(channelName)) return candidates;
         String name = channelName.trim();
         if (name.isEmpty()) return candidates;
 
-        // ① 原始名称始终作为候选
         candidates.add(name);
 
-        // ② 末尾带“台”时，去掉“台”作为第二个候选
         if (name.length() > 1 && name.endsWith("台")) {
             String without = name.substring(0, name.length() - 1).trim();
             if (!without.isEmpty() && !without.equals(name)) {
@@ -605,6 +547,7 @@ public class EpgManager {
             }
             if (!TextUtils.isEmpty(remoteHash)) writeTextAtomically(localHashFile, remoteHash);
 
+            // XML 文件已更新 → 必须整体清空缓存，下次按需重新解析
             synchronized (parseLock) {
                 channelsByDisplayName.clear();
                 channelsById.clear();
@@ -678,13 +621,19 @@ public class EpgManager {
         return RefreshResult.ok();
     }
 
+    /**
+     * 增量解析指定 epgids 对应的 XMLTV 频道/节目，合并进现有缓存。
+     *
+     * 关键点：不再 clear 任何现有缓存，只做 put/merge；loadedEpgIds 只增不减。
+     * 只有 refreshFromHash 中检测到 XML hash 变化时，才会整体清空。
+     */
     private boolean parseXmlForEpgIds(File file, Set<String> requestedEpgIds) {
         if (requestedEpgIds == null || requestedEpgIds.isEmpty()) return true;
         synchronized (parseLock) {
             try {
+                // ===== 第一遍：解析 <channel>，建立 displayName → epgid 的映射 =====
                 final Map<String, ChannelInfo> newByName = new HashMap<>();
                 final Map<String, ChannelInfo> newById = new HashMap<>();
-                final Map<String, List<EpgProgram>> newPrograms = new HashMap<>();
                 final Map<String, List<String>> idsByEpgId = new HashMap<>();
                 final Set<String> wantedXmlChannelIds = new HashSet<>();
 
@@ -749,6 +698,8 @@ public class EpgManager {
                     }
                 }
 
+                // ===== 第二遍：解析 <programme>，只保留我们关心的 channel =====
+                final Map<String, List<EpgProgram>> newPrograms = new HashMap<>();
                 parser = factory.newPullParser();
                 try (InputStream input = new FileInputStream(file)) {
                     parser.setInput(input, null);
@@ -798,12 +749,44 @@ public class EpgManager {
                     }
                 }
 
-                final Map<String, List<EpgProgram>> newProgramsByEpgId = new HashMap<>();
+                // ===== 增量合并（关键修复：不再 clear 已有缓存）=====
+
+                // 1) channelId → ChannelInfo：合并
+                for (Map.Entry<String, ChannelInfo> e : newById.entrySet()) {
+                    channelsById.put(e.getKey(), e.getValue());
+                }
+
+                // 2) epgid → ChannelInfo 代表项：合并（用于台标查找）
+                for (Map.Entry<String, ChannelInfo> e : newByName.entrySet()) {
+                    channelsByDisplayName.put(e.getKey(), e.getValue());
+                }
+
+                // 3) channelId → programmes：合并
+                for (Map.Entry<String, List<EpgProgram>> e : newPrograms.entrySet()) {
+                    programsByChannelId.put(e.getKey(), e.getValue());
+                }
+
+                // 4) epgid → [channelId, ...]：追加去重
                 for (Map.Entry<String, List<String>> entry : idsByEpgId.entrySet()) {
                     String epgid = entry.getKey();
-                    List<EpgProgram> merged = new ArrayList<>();
+                    List<String> existing = xmlChannelIdsByEpgId.get(epgid);
+                    if (existing == null) {
+                        existing = new ArrayList<>();
+                        xmlChannelIdsByEpgId.put(epgid, existing);
+                    }
                     for (String id : entry.getValue()) {
-                        List<EpgProgram> list = newPrograms.get(id);
+                        if (!existing.contains(id)) existing.add(id);
+                    }
+                }
+
+                // 5) 为本次涉及的 epgid 重算合并后的 programmesByEpgId
+                for (Map.Entry<String, List<String>> entry : idsByEpgId.entrySet()) {
+                    String epgid = entry.getKey();
+                    List<String> allChannelIds = xmlChannelIdsByEpgId.get(epgid);
+                    if (allChannelIds == null || allChannelIds.isEmpty()) continue;
+                    List<EpgProgram> merged = new ArrayList<>();
+                    for (String id : allChannelIds) {
+                        List<EpgProgram> list = programsByChannelId.get(id);
                         if (list != null) merged.addAll(list);
                     }
                     Collections.sort(merged, (a, b) -> {
@@ -811,41 +794,34 @@ public class EpgManager {
                         if (b == null || b.start == null) return -1;
                         return a.start.compareTo(b.start);
                     });
-                    newProgramsByEpgId.put(epgid, merged);
-                    FileLogger.write(TAG, "EPG完整汇总: epgid=[" + epgid + "] channelIds=" + entry.getValue()
-                            + " programmes=" + merged.size() + " dates=" + buildProgramDateKeys(merged));
+                    programsByEpgId.put(epgid, merged);
+                    FileLogger.write(TAG, "EPG完整汇总(增量): epgid=[" + epgid
+                            + "] channelIds=" + allChannelIds
+                            + " programmes=" + merged.size()
+                            + " dates=" + buildProgramDateKeys(merged));
                 }
 
-                channelsByDisplayName.clear();
-                channelsByDisplayName.putAll(newByName);
-                channelsById.clear();
-                channelsById.putAll(newById);
-                programsByChannelId.clear();
-                programsByChannelId.putAll(newPrograms);
-                programsByEpgId.clear();
-                programsByEpgId.putAll(newProgramsByEpgId);
-                iconUrlByEpgId.clear();
+                // 6) iconUrl 只补充，不覆盖已有
                 for (Map.Entry<String, ChannelInfo> e : newByName.entrySet()) {
-                    if (e.getValue() != null && !TextUtils.isEmpty(e.getValue().iconUrl)) iconUrlByEpgId.put(e.getKey(), e.getValue().iconUrl);
+                    String epgid = e.getKey();
+                    ChannelInfo info = e.getValue();
+                    if (info != null && !TextUtils.isEmpty(info.iconUrl)
+                            && !iconUrlByEpgId.containsKey(epgid)) {
+                        iconUrlByEpgId.put(epgid, info.iconUrl);
+                    }
                 }
-                xmlChannelIdsByEpgId.clear();
-                for (Map.Entry<String, List<String>> entry : idsByEpgId.entrySet()) {
-                    xmlChannelIdsByEpgId.put(entry.getKey(), new ArrayList<>(entry.getValue()));
-                }
-                loadedEpgIds.clear();
-                loadedEpgIds.addAll(requestedEpgIds);
-                parsed = !newById.isEmpty() || requestedEpgIds.isEmpty();
 
-                int count = 0;
-                for (String epgid : newByName.keySet()) {
-                    ChannelInfo info = newByName.get(epgid);
-                    if (info == null) continue;
-                    List<EpgProgram> list = newPrograms.get(info.channelId);
-                    if (list != null) count += list.size();
-                }
-                FileLogger.write(TAG, "按频道组完整懒解析完成: requested=" + requestedEpgIds.size()
-                        + ", channels=" + newById.size() + ", epgid=" + newByName.size()
-                        + ", programmes=" + count);
+                // 7) loadedEpgIds 只增不减
+                loadedEpgIds.addAll(requestedEpgIds);
+
+                // parsed 只要通道库非空即为真
+                parsed = !channelsById.isEmpty();
+
+                FileLogger.write(TAG, "按频道组增量解析完成: 本次请求=" + requestedEpgIds.size()
+                        + ", 本次命中=" + newByName.size()
+                        + ", 累计已加载=" + loadedEpgIds.size()
+                        + ", 累计通道数=" + channelsById.size()
+                        + ", 累计epgid数=" + programsByEpgId.size());
                 return true;
             } catch (Exception e) {
                 FileLogger.write(TAG, "按频道组解析失败", e);
@@ -856,10 +832,6 @@ public class EpgManager {
 
     // ======================== 分组 EPG 预热入口 ========================
 
-    /**
-     * 主线程上延迟执行的聚合任务：把短时间内收集到的频道名合并成一次
-     * loadChannelGroup 调用，避免 UI 逐个频道触发时把同一分组解析多次。
-     */
     private final Runnable epgWarmupTask = new Runnable() {
         @Override
         public void run() {
@@ -874,10 +846,6 @@ public class EpgManager {
         }
     };
 
-    /**
-     * 由 loadProcessedChannelIcon 触发的 EPG 预热请求。
-     * 仅当该频道所属分组尚未解析时才加入待预热集合。
-     */
     private void requestEpgWarmUp(String channelName) {
         if (TextUtils.isEmpty(channelName)) return;
         if (parsed) {
@@ -894,8 +862,10 @@ public class EpgManager {
     }
 
     /**
-     * 主动调用：解析整个频道分组的 EPG（分组切换时用）。
-     * 解析完成后会为整个分组的频道触发台标预热（不影响 EPG 本身）。
+     * 主动调用：解析整个频道分组的 EPG。
+     *
+     * 【修复】判重逻辑改为 containsAll —— 只要 requested 是 loadedEpgIds 的子集就跳过，
+     * 否则触发增量解析（不会清空已有缓存）。
      */
     public void loadChannelGroup(final List<String> channelNames, final Runnable onComplete) {
         if (channelNames == null || channelNames.isEmpty()) {
@@ -904,7 +874,6 @@ public class EpgManager {
         }
 
         final Set<String> requested = new HashSet<>();
-        // 记录“候选 -> 一组原始频道名”，解析成功后用于回填动态映射。
         final Map<String, Set<String>> derivedToOriginal = new HashMap<>();
 
         for (String name : channelNames) {
@@ -914,7 +883,6 @@ public class EpgManager {
                 requested.add(epgid);
                 continue;
             }
-            // epg_data.json 与 dynamic_epg_ids.json 均未命中 → 从频道名推导候选。
             List<String> candidates = deriveEpgIdCandidates(name);
             if (!candidates.isEmpty()) {
                 for (String cand : candidates) {
@@ -939,10 +907,11 @@ public class EpgManager {
             final List<String[]> backfill = new ArrayList<>();
             try {
                 synchronized (parseLock) {
-                    if (!(loadedEpgIds.equals(requested) && parsed)) {
+                    // 【修复】containsAll：requested 已是 loadedEpgIds 的子集才跳过
+                    if (!(parsed && loadedEpgIds.containsAll(requested))) {
                         parseXmlForEpgIds(epgFile, requested);
                     }
-                    // 只有真正命中 XMLTV display-name 的候选才会被回填。
+
                     for (Map.Entry<String, Set<String>> e : derivedToOriginal.entrySet()) {
                         String candidate = e.getKey();
                         if (xmlChannelIdsByEpgId.containsKey(candidate)) {
@@ -975,7 +944,6 @@ public class EpgManager {
                 FileLogger.write(TAG, "当前频道组 EPG 懒加载失败", e);
             } finally {
                 if (onComplete != null) mainHandler.post(onComplete);
-                // EPG 解析完成后，反过来为整个分组的频道预热台标（不触发 EPG 预热）。
                 for (String name : channelNames) {
                     if (TextUtils.isEmpty(name)) continue;
                     doLoadProcessedChannelIcon(name, null);
@@ -1020,9 +988,6 @@ public class EpgManager {
         return getChannelIconUrl(channelName);
     }
 
-    /**
-     * 只读地返回 EPG 中该频道对应的 icon 地址（不触发下载）。
-     */
     public String getChannelIconUrl(String channelName) {
         if (!parsed || TextUtils.isEmpty(channelName)) return "";
         String epgid = getEpgIdByChannelName(channelName);
@@ -1038,22 +1003,11 @@ public class EpgManager {
     }
 
     // ======================== 台标：本地 → EPG → GitHub ========================
-
-    /**
-     * 公开入口：加载台标。同时作为“分组切换时自动预热整个分组 EPG”的触发点——
-     * UI 侧在分组切换时为每个频道调它加载台标，此处收集频道名并聚合触发
-     * loadChannelGroup，从而让整个分组的节目预告也自动加载。
-     */
     public void loadProcessedChannelIcon(final String channelName, final IconCallback callback) {
-        // 分组切换时 UI 会为每个频道调这里，顺便请求 EPG 预热。
         requestEpgWarmUp(channelName);
         doLoadProcessedChannelIcon(channelName, callback);
     }
 
-    /**
-     * 内部方法：只做台标下载，不触发 EPG 预热。
-     * loadChannelGroup 完成后会调这里为整个分组预热台标，形成双向兜底。
-     */
     private void doLoadProcessedChannelIcon(final String channelName, final IconCallback callback) {
         if (TextUtils.isEmpty(channelName)) {
             if (callback != null) mainHandler.post(() -> callback.onIcon(null));
