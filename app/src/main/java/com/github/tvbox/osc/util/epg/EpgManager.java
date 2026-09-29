@@ -52,30 +52,10 @@ import okhttp3.Response;
 /**
  * XMLTV EPG manager.
  *
- * EPG source of truth is the downloaded XMLTV file in files/epgche/epg.xml.
- * The remote <epg-url>.hash is checked first. Only when the hash changes (or
- * the local XML is missing) is the XML downloaded again. Playback never waits
- * for EPG network I/O: refresh and icon downloads run in background threads.
- *
- * 台标加载策略（顺序回退）：
- *   1) 本地 logos/{epgid}.png 存在 → 直接返回
- *   2) EPG 文件里该 epgid 有 icon 地址 → 下载 → 透明化 → 保存为 {epgid}.png
- *   3) EPG 没有或下载失败 → 到 GitHub 仓库下载 {epgid}.png
- *        （GitHub 仓库本身已是透明 PNG，原样保存，不再透明化）
- *   4) 全部失败 → 返回 null，调用方不显示台标
- *
- * EPG ID 解析策略（按优先级）：
- *   1) assets/epg_data.json 的静态映射（或本地缓存版本）；
- *   2) 运行期回填的动态映射 dynamic_epg_ids.json；
- *   3) 仍未命中时用“候选名”去 XMLTV 的 display-name 里做精确匹配；
- *   4) 全部未命中 → 视为 XMLTV 中确实没有该频道。
- *
  * 【本次修复】
- *   parseXmlForEpgIds 从「清空重建」改为「增量合并」：
- *     - 每次只解析本次请求的 epgid，解析出的结果合并进已有缓存；
- *     - 之前已加载的 epgid 数据不会被冲掉；
- *     - loadedEpgIds 只增不减（除非 XML 文件 hash 变化才整体清空）。
- *   loadChannelGroup 里的判重从 equals 改为 containsAll。
+ *   1) parseXmlForEpgIds 从「清空重建」改为「增量合并」；
+ *   2) loadChannelGroup 判重从 equals 改为 containsAll；
+ *   3) 台标预热改成分批下载 scheduleIconWarmup，避免点击分组时卡顿。
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -119,16 +99,10 @@ public class EpgManager {
     private volatile boolean refreshRunning;
     private final List<RefreshCallback> pendingRefreshCallbacks = new ArrayList<>();
 
-    // epg_data.json: every variant name maps to one shared epgid.
     private final Map<String, String> nameToEpgId = new HashMap<>();
-
-    // 动态回填映射：频道名 -> 从 XMLTV 里精确匹配到的候选 epgid。
     private final Map<String, String> dynamicEpgIds = new HashMap<>();
-
-    // 分组切换时，由 loadProcessedChannelIcon 收集的待预热频道名。
     private final Set<String> pendingEpgWarmup = Collections.synchronizedSet(new LinkedHashSet<>());
 
-    // Parsed XMLTV indexes. Access is synchronized through parseLock.
     private final Object parseLock = new Object();
     private final Map<String, ChannelInfo> channelsByDisplayName = new HashMap<>();
     private final Map<String, ChannelInfo> channelsById = new HashMap<>();
@@ -139,6 +113,9 @@ public class EpgManager {
     private final Set<String> loadedEpgIds = new HashSet<>();
 
     private volatile boolean epgDataRefreshRunning = false;
+
+    /** 台标预热任务的 generation，用来在切换分组时作废旧任务。 */
+    private volatile int iconWarmupGeneration = 0;
 
     private static final String LOGO_PREFS = "logo_settings";
     private static final String LOGO_SOURCE_KEY = "xmltv_logo_source";
@@ -623,15 +600,12 @@ public class EpgManager {
 
     /**
      * 增量解析指定 epgids 对应的 XMLTV 频道/节目，合并进现有缓存。
-     *
-     * 关键点：不再 clear 任何现有缓存，只做 put/merge；loadedEpgIds 只增不减。
      * 只有 refreshFromHash 中检测到 XML hash 变化时，才会整体清空。
      */
     private boolean parseXmlForEpgIds(File file, Set<String> requestedEpgIds) {
         if (requestedEpgIds == null || requestedEpgIds.isEmpty()) return true;
         synchronized (parseLock) {
             try {
-                // ===== 第一遍：解析 <channel>，建立 displayName → epgid 的映射 =====
                 final Map<String, ChannelInfo> newByName = new HashMap<>();
                 final Map<String, ChannelInfo> newById = new HashMap<>();
                 final Map<String, List<String>> idsByEpgId = new HashMap<>();
@@ -698,7 +672,6 @@ public class EpgManager {
                     }
                 }
 
-                // ===== 第二遍：解析 <programme>，只保留我们关心的 channel =====
                 final Map<String, List<EpgProgram>> newPrograms = new HashMap<>();
                 parser = factory.newPullParser();
                 try (InputStream input = new FileInputStream(file)) {
@@ -749,24 +722,16 @@ public class EpgManager {
                     }
                 }
 
-                // ===== 增量合并（关键修复：不再 clear 已有缓存）=====
-
-                // 1) channelId → ChannelInfo：合并
+                // ===== 增量合并（不再 clear 已有缓存）=====
                 for (Map.Entry<String, ChannelInfo> e : newById.entrySet()) {
                     channelsById.put(e.getKey(), e.getValue());
                 }
-
-                // 2) epgid → ChannelInfo 代表项：合并（用于台标查找）
                 for (Map.Entry<String, ChannelInfo> e : newByName.entrySet()) {
                     channelsByDisplayName.put(e.getKey(), e.getValue());
                 }
-
-                // 3) channelId → programmes：合并
                 for (Map.Entry<String, List<EpgProgram>> e : newPrograms.entrySet()) {
                     programsByChannelId.put(e.getKey(), e.getValue());
                 }
-
-                // 4) epgid → [channelId, ...]：追加去重
                 for (Map.Entry<String, List<String>> entry : idsByEpgId.entrySet()) {
                     String epgid = entry.getKey();
                     List<String> existing = xmlChannelIdsByEpgId.get(epgid);
@@ -778,8 +743,6 @@ public class EpgManager {
                         if (!existing.contains(id)) existing.add(id);
                     }
                 }
-
-                // 5) 为本次涉及的 epgid 重算合并后的 programmesByEpgId
                 for (Map.Entry<String, List<String>> entry : idsByEpgId.entrySet()) {
                     String epgid = entry.getKey();
                     List<String> allChannelIds = xmlChannelIdsByEpgId.get(epgid);
@@ -800,8 +763,6 @@ public class EpgManager {
                             + " programmes=" + merged.size()
                             + " dates=" + buildProgramDateKeys(merged));
                 }
-
-                // 6) iconUrl 只补充，不覆盖已有
                 for (Map.Entry<String, ChannelInfo> e : newByName.entrySet()) {
                     String epgid = e.getKey();
                     ChannelInfo info = e.getValue();
@@ -810,11 +771,7 @@ public class EpgManager {
                         iconUrlByEpgId.put(epgid, info.iconUrl);
                     }
                 }
-
-                // 7) loadedEpgIds 只增不减
                 loadedEpgIds.addAll(requestedEpgIds);
-
-                // parsed 只要通道库非空即为真
                 parsed = !channelsById.isEmpty();
 
                 FileLogger.write(TAG, "按频道组增量解析完成: 本次请求=" + requestedEpgIds.size()
@@ -862,10 +819,34 @@ public class EpgManager {
     }
 
     /**
+     * 分批下载台标，避免一次性塞满 iconExecutor 造成的网络/CPU 峰值。
+     * 每 250ms 只启动 2 个下载任务；切换分组时旧任务自动作废。
+     */
+    private void scheduleIconWarmup(List<String> channelNames) {
+        final int gen = ++iconWarmupGeneration;
+        final List<String> list = new ArrayList<>();
+        for (String name : channelNames) {
+            if (!TextUtils.isEmpty(name)) list.add(name);
+        }
+        if (list.isEmpty()) return;
+        mainHandler.post(new Runnable() {
+            int index = 0;
+            @Override public void run() {
+                if (gen != iconWarmupGeneration) return;      // 已被新分组取代
+                int end = Math.min(index + 2, list.size());
+                for (int i = index; i < end; i++) {
+                    doLoadProcessedChannelIcon(list.get(i), null);
+                }
+                index = end;
+                if (index < list.size()) {
+                    mainHandler.postDelayed(this, 250L);
+                }
+            }
+        });
+    }
+
+    /**
      * 主动调用：解析整个频道分组的 EPG。
-     *
-     * 【修复】判重逻辑改为 containsAll —— 只要 requested 是 loadedEpgIds 的子集就跳过，
-     * 否则触发增量解析（不会清空已有缓存）。
      */
     public void loadChannelGroup(final List<String> channelNames, final Runnable onComplete) {
         if (channelNames == null || channelNames.isEmpty()) {
@@ -907,7 +888,7 @@ public class EpgManager {
             final List<String[]> backfill = new ArrayList<>();
             try {
                 synchronized (parseLock) {
-                    // 【修复】containsAll：requested 已是 loadedEpgIds 的子集才跳过
+                    // containsAll：requested 已是 loadedEpgIds 的子集才跳过
                     if (!(parsed && loadedEpgIds.containsAll(requested))) {
                         parseXmlForEpgIds(epgFile, requested);
                     }
@@ -944,10 +925,8 @@ public class EpgManager {
                 FileLogger.write(TAG, "当前频道组 EPG 懒加载失败", e);
             } finally {
                 if (onComplete != null) mainHandler.post(onComplete);
-                for (String name : channelNames) {
-                    if (TextUtils.isEmpty(name)) continue;
-                    doLoadProcessedChannelIcon(name, null);
-                }
+                // 分批预热台标，避免瞬时网络/CPU 峰值拖卡直播
+                scheduleIconWarmup(channelNames);
             }
         });
     }
