@@ -980,6 +980,7 @@ public class LivePlayActivity extends BaseActivity {
         } catch (Exception e) { FileLogger.write("LivePlay", "获取当前频道组 EPG 名称失败", e); }
         return names;
     }
+
     public void getEpg(Date date) {
         if (channel_Name == null) return;
         final String channelName = channel_Name.getChannelName();
@@ -1284,6 +1285,7 @@ public class LivePlayActivity extends BaseActivity {
         if (channel_Name == null || channel_Name.getChannelName() == null) return;
         tip_chname.setText(channel_Name.getChannelName());
         if (tv_channelnum != null) tv_channelnum.setText("" + channel_Name.getChannelNum());
+
         Epginfo currentEpg = null, nextEpg = null;
         if (epgdata != null && !epgdata.isEmpty()) {
             int idx = findCurrentEpgIndex(epgdata);
@@ -1295,6 +1297,8 @@ public class LivePlayActivity extends BaseActivity {
         EpgManager manager = EpgManager.getInstance(this);
         EpgManager.EpgProgram currentProgram = manager.getCurrentProgram(channel_Name.getChannelName());
         EpgManager.EpgProgram nextProgram = manager.getNextProgram(channel_Name.getChannelName());
+
+        // 尝试从"已下载当天节目列表"里兜底补全
         if (currentEpg == null || nextEpg == null) {
             try {
                 List<EpgManager.EpgProgram> downloaded = manager.getProgramsForChannelOnDate(channel_Name.getChannelName(), new Date());
@@ -1317,6 +1321,7 @@ public class LivePlayActivity extends BaseActivity {
                 }
             } catch (Exception ignored) { }
         }
+
         if (currentEpg != null) {
             tip_epg1.setText(currentEpg.start + "-" + currentEpg.end);
             if (tvCurrentProgramName != null) tvCurrentProgramName.setText(currentEpg.title);
@@ -1325,11 +1330,18 @@ public class LivePlayActivity extends BaseActivity {
             tip_epg1.setText(formatEpgTime(currentProgram.start) + "-" + formatEpgTime(currentProgram.stop));
             if (tvCurrentProgramName != null) tvCurrentProgramName.setText(currentProgram.title);
             if (tvDesc != null) { tvDesc.setText(TextUtils.isEmpty(currentProgram.description) ? "暂无描述信息" : currentProgram.description); tvDesc.setVisibility(View.VISIBLE); }
-        } else {
+        } else if (hasCachedEpgForChannel(channel_Name.getChannelName())) {
+            // 有历史缓存但今天没数据 → 显示暂无
             tip_epg1.setText("暂无当前节目");
             if (tvCurrentProgramName != null) tvCurrentProgramName.setText("暂无节目预告");
             if (tvDesc != null) { tvDesc.setText("暂无描述信息"); tvDesc.setVisibility(View.VISIBLE); }
+        } else {
+            // 没有任何缓存 → 显示加载中，等异步回调刷新，不闪烁
+            tip_epg1.setText("正在加载...");
+            if (tvCurrentProgramName != null) tvCurrentProgramName.setText("正在获取节目预告...");
+            if (tvDesc != null) { tvDesc.setText("正在获取节目预告，请稍候"); tvDesc.setVisibility(View.VISIBLE); }
         }
+
         if (nextEpg != null) {
             tip_epg2.setText(nextEpg.start + "-" + nextEpg.end);
             if (tvNextProgramName != null) tvNextProgramName.setText(nextEpg.title);
@@ -1340,6 +1352,7 @@ public class LivePlayActivity extends BaseActivity {
             tip_epg2.setText("暂无下一节目");
             if (tvNextProgramName != null) tvNextProgramName.setText("暂无节目预告");
         }
+
         if (tv_srcinfo != null) {
             if (channel_Name.getSourceNum() <= 0) tv_srcinfo.setText("1/1");
             else tv_srcinfo.setText("线路" + (channel_Name.getSourceIndex() + 1) + "/" + channel_Name.getSourceNum());
@@ -1348,7 +1361,7 @@ public class LivePlayActivity extends BaseActivity {
         if (tv_right_top_epg_name != null) tv_right_top_epg_name.setText(channel_Name.getChannelName());
         updateBottomInfoBar();
         if (countDownTimer != null) countDownTimer.cancel();
-        if (!"暂无当前节目".equals(tip_epg1.getText().toString())) {
+        if (!"暂无当前节目".equals(tip_epg1.getText().toString()) && !"正在加载...".equals(tip_epg1.getText().toString())) {
             if (ll_right_top_loading != null) ll_right_top_loading.setVisibility(View.VISIBLE);
             if (ll_epg != null && !isListOrSettingLayoutVisible()) ll_epg.setVisibility(View.VISIBLE);
             countDownTimer = new CountDownTimer(postTimeout, 1000) {
@@ -1363,7 +1376,7 @@ public class LivePlayActivity extends BaseActivity {
         } else {
             if (ll_right_top_loading != null) ll_right_top_loading.setVisibility(View.GONE);
             if (ll_right_top_huikan != null) ll_right_top_huikan.setVisibility(View.GONE);
-            if (ll_epg != null) ll_epg.setVisibility(View.GONE);
+            if (ll_epg != null && !"正在加载...".equals(tip_epg1.getText().toString())) ll_epg.setVisibility(View.GONE);
         }
         updateCurrentChannelIcon();
     }
@@ -1781,7 +1794,6 @@ public class LivePlayActivity extends BaseActivity {
         if (liveChannelGroupList == null || liveChannelGroupList.isEmpty()) return;
 
         if (tvLeftChannelListLayout != null && tvLeftChannelListLayout.getVisibility() == View.INVISIBLE) {
-            // 弹窗打开：为当前分组所有频道触发 EPG
             loadGroupAllChannelsEpg(currentChannelGroupIndex);
 
             refreshSourceList();
@@ -1799,10 +1811,10 @@ public class LivePlayActivity extends BaseActivity {
 
     /**
      * 分组 EPG 批量加载（核心）：
-     * - 立刻从本地缓存刷新一次 UI（可能部分频道已有）；
-     * - XML EPG：走 EpgManager.loadChannelGroup（内部聚合预热）；
+     * - 立刻从本地缓存刷新一次 UI；
+     * - XML EPG：走 EpgManager.loadChannelGroup；
      * - 非 XML EPG：单线程逐个 HTTP 请求，命中一个立刻刷新一行；
-     * - 每次调用递增 requestId，切换分组后旧请求自动作废。
+     * - 通过 requestId 保证切换分组后旧请求自动作废。
      */
     private void loadGroupAllChannelsEpg(int groupIndex) {
         final int requestId = ++mGroupEpgRequestId;
@@ -1828,8 +1840,12 @@ public class LivePlayActivity extends BaseActivity {
         if (isXmlEpgAddress(epgStringAddress)) {
             EpgManager.getInstance(this).loadChannelGroup(channelNames, () -> {
                 if (requestId != mGroupEpgRequestId) return;
-                if (groupIndex != currentChannelGroupIndex) return;
                 if (liveChannelItemAdapter != null) loadGroupChannelsEpgPreview(groupIndex);
+                // 关键：如果当前正在播放的频道属于本分组，立刻刷新底部信息栏
+                if (channel_Name != null && channelNames.contains(channel_Name.getChannelName())) {
+                    showBottomEpg();
+                    updateBottomInfoBar();
+                }
             });
             return;
         }
@@ -1842,11 +1858,14 @@ public class LivePlayActivity extends BaseActivity {
                 if (hasCachedEpgForChannel(channelName)) continue;
                 fetchChannelEpgBlocking(channelName, requestId, groupIndex);
             }
-            // 全部请求结束后，再统一刷一次（保证列表整齐）
+            // 全部完成后刷新列表 + 当前频道底部信息
             mHandler.post(() -> {
                 if (requestId != mGroupEpgRequestId) return;
-                if (groupIndex != currentChannelGroupIndex) return;
                 if (liveChannelItemAdapter != null) loadGroupChannelsEpgPreview(groupIndex);
+                if (channel_Name != null && channelNames.contains(channel_Name.getChannelName())) {
+                    showBottomEpg();
+                    updateBottomInfoBar();
+                }
             });
         });
     }
@@ -1900,8 +1919,12 @@ public class LivePlayActivity extends BaseActivity {
             final ArrayList<Epginfo> finalResult = result;
             mHandler.post(() -> {
                 if (requestId != mGroupEpgRequestId) return;
-                if (groupIndex != currentChannelGroupIndex) return;
                 updateSingleChannelPreview(channelName, finalResult);
+                // 如果正在播放这个频道，同步刷新底部
+                if (channel_Name != null && channelName.equals(channel_Name.getChannelName())) {
+                    showBottomEpg();
+                    updateBottomInfoBar();
+                }
             });
         } catch (Throwable e) {
             FileLogger.write("LivePlay", "fetchChannelEpgBlocking error: " + channelName, e);
@@ -1947,7 +1970,6 @@ public class LivePlayActivity extends BaseActivity {
     private void refreshChannelList(int currentChannelGroupIndex) {
         List<LiveChannelItem> newChannels = getLiveChannels(currentChannelGroupIndex);
         if (currentChannelGroupIndex == mLastChannelGroupIndex && isSameData(newChannels, mLastChannelList)) {
-            // 即使数据相同，也触发一次 EPG 批量拉取（可能有新缓存）
             loadGroupAllChannelsEpg(currentChannelGroupIndex);
             return;
         }
@@ -1956,7 +1978,6 @@ public class LivePlayActivity extends BaseActivity {
         mLastChannelGroupIndex = currentChannelGroupIndex;
         mLastChannelList = new ArrayList<>(newChannels != null ? newChannels : new ArrayList<>());
         if (liveChannelItemAdapter != null) liveChannelItemAdapter.setNewData(newChannels != null ? newChannels : new ArrayList<>());
-        // 复用已有缓存 + 触发批量 EPG
         loadGroupChannelsEpgPreview(currentChannelGroupIndex);
         loadGroupAllChannelsEpg(currentChannelGroupIndex);
     }
@@ -2104,7 +2125,6 @@ public class LivePlayActivity extends BaseActivity {
             liveChannelItemAdapter.setFocusedChannelIndex(channelIndex);
         }
         focusRecyclerPosition(mLiveChannelView, channelIndex);
-        // 切到某个分组时也触发一次 EPG 批量拉取
         loadGroupAllChannelsEpg(groupIndex);
     }
 
@@ -2375,6 +2395,8 @@ public class LivePlayActivity extends BaseActivity {
         }
         cancelLiveReconnect();
         channel_Name = currentLiveChannelItem;
+        // 新增：清空旧频道的 EPG 数据，避免错误显示上一个频道的信息
+        epgdata = new ArrayList<>();
         currentLiveLookBackIndex = -1;
         if (epgListAdapter != null) epgListAdapter.setSelectedEpgIndex(-1);
         isSHIYI = false;
@@ -5065,7 +5087,6 @@ public class LivePlayActivity extends BaseActivity {
     }
 
     private void preloadCurrentGroupEpgResources(int groupIndex) {
-        // 兼容原调用：改为统一走新的批量 EPG 加载
         loadGroupAllChannelsEpg(groupIndex);
     }
 
