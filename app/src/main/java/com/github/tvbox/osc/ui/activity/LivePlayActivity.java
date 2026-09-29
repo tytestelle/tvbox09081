@@ -29,6 +29,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -43,6 +44,7 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.core.content.ContextCompat;
+import androidx.recyclerview.widget.DiffUtil;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -188,6 +190,10 @@ public class LivePlayActivity extends BaseActivity {
     private int ku9GuideChannelFocusPosition = -1;
     private int currentKu9DatePos = -1;
     private int lastLoadedKu9DateFocusedPos = -1;
+
+    // ===== 左侧面板尺寸与状态 =====
+    private int mLeftPanelWidth = 0;
+    private boolean mLeftPanelAnimating = false;
 
     private final Runnable mKu9DateWatchRun = new Runnable() {
         @Override public void run() {
@@ -1551,9 +1557,6 @@ public class LivePlayActivity extends BaseActivity {
     private Runnable mLongPressRunnable;
     private static final long LONG_PRESS_DELAY = 800;
 
-    /**
-     * 判断焦点当前是否落在偏好设置面板内部（分组或选项列表）
-     */
     private boolean isFocusInSettingPanel() {
         if (tvRightSettingLayout == null || tvRightSettingLayout.getVisibility() != View.VISIBLE) return false;
         View focused = getCurrentFocus();
@@ -1562,9 +1565,6 @@ public class LivePlayActivity extends BaseActivity {
                 || (mSettingItemView != null && isChildOf(mSettingItemView, focused));
     }
 
-    /**
-     * 当偏好设置面板打开但焦点不在面板内时，把焦点抢回分组列表
-     */
     private boolean ensureSettingPanelFocus() {
         if (tvRightSettingLayout == null || tvRightSettingLayout.getVisibility() != View.VISIBLE) return false;
         if (isFocusInSettingPanel()) return false;
@@ -1578,11 +1578,6 @@ public class LivePlayActivity extends BaseActivity {
         return true;
     }
 
-    /**
-     * 设置面板内方向键处理：
-     * 左右在分组与选项两栏之间切换；上下由 RecyclerView 自行处理。
-     * 返回 true 表示已消费。
-     */
     private boolean handleSettingPanelKeyDown(int keyCode) {
         if (tvRightSettingLayout == null || tvRightSettingLayout.getVisibility() != View.VISIBLE) return false;
         View focused = getCurrentFocus();
@@ -1612,7 +1607,6 @@ public class LivePlayActivity extends BaseActivity {
             requestRecyclerItemFocus(mSettingGroupView, pos, 0);
             return true;
         }
-        // 上下键或其他键放行，让 RecyclerView 自身处理
         return false;
     }
 
@@ -1674,10 +1668,8 @@ public class LivePlayActivity extends BaseActivity {
                     return true;
                 }
             }
-            // 偏好设置面板内，方向键的上下由 RecyclerView 自行处理，左右由这里接管
             if (tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.VISIBLE) {
                 if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_ESCAPE) {
-                    // 保持原有返回逻辑
                 } else {
                     if (handleSettingPanelKeyDown(keyCode)) return true;
                 }
@@ -1721,7 +1713,6 @@ public class LivePlayActivity extends BaseActivity {
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        // 偏好设置面板可见时，不挂长按监听器，避免在面板里按 OK 又弹一次设置面板
         boolean settingVisible = tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.VISIBLE;
         if (!settingVisible
                 && (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
@@ -1761,7 +1752,7 @@ public class LivePlayActivity extends BaseActivity {
     @Override
     protected void onDestroy() {
         cancelLiveReconnect();
-        stopSubscribeServer();   // 关闭时停止订阅服务器
+        stopSubscribeServer();
         super.onDestroy();
         try { unregisterReceiver(liveRefreshReceiver); } catch (Exception e) { }
         Hawk.put(HawkConfig.PLAYER_IS_LIVE, false);
@@ -1772,6 +1763,7 @@ public class LivePlayActivity extends BaseActivity {
         mHandler.removeCallbacks(mKu9DateWatchRun);
     }
 
+    // ===================== 左侧面板：显示/隐藏 动画（改为 translationX） =====================
     private void showChannelList() {
         hideBottomInfoBar();
         if (tvRightSettingLayout != null && tvRightSettingLayout.getVisibility() == View.VISIBLE) {
@@ -1780,9 +1772,13 @@ public class LivePlayActivity extends BaseActivity {
             return;
         }
         if (ll_epg != null) ll_epg.setVisibility(View.GONE);
-        if (tvLeftChannelListLayout != null) { tvLeftChannelListLayout.setTranslationX(0); tvLeftChannelListLayout.bringToFront(); }
+        if (tvLeftChannelListLayout != null) { tvLeftChannelListLayout.bringToFront(); }
         if (liveChannelGroupList == null || liveChannelGroupList.isEmpty()) return;
+
         if (tvLeftChannelListLayout != null && tvLeftChannelListLayout.getVisibility() == View.INVISIBLE) {
+            // ===== 弹出：预加载当前分组所有频道的 EPG =====
+            preloadCurrentGroupEpg();
+
             refreshSourceList();
             if (currentLiveLookBackIndex > -1 && mRightEpgList != null) {
                 mRightEpgList.setSelectedPosition(currentLiveLookBackIndex);
@@ -1793,6 +1789,39 @@ public class LivePlayActivity extends BaseActivity {
         } else {
             mHandler.removeCallbacks(mHideChannelListRun);
             mHandler.post(mHideChannelListRun);
+        }
+    }
+
+    /**
+     * 弹出左侧列表时，为当前分组所有频道触发 EPG 预加载。
+     * 仅对 XML 类型 EPG 生效（其它模式没有 loadChannelGroup 概念）。
+     */
+    private void preloadCurrentGroupEpg() {
+        try {
+            if (!isXmlEpgAddress(epgStringAddress)) return;
+            List<LiveChannelItem> channels = getLiveChannels(currentChannelGroupIndex);
+            if (channels == null || channels.isEmpty()) return;
+            final ArrayList<String> names = new ArrayList<>();
+            for (LiveChannelItem item : channels) {
+                if (item == null) continue;
+                String name = item.getChannelName();
+                if (TextUtils.isEmpty(name) || names.contains(name)) continue;
+                names.add(name);
+            }
+            if (names.isEmpty()) return;
+            final int groupIndexAtRequest = currentChannelGroupIndex;
+            EpgManager.getInstance(this).loadChannelGroup(names, () -> {
+                // 分组切换了就丢弃
+                if (groupIndexAtRequest != currentChannelGroupIndex) return;
+                if (liveChannelItemAdapter != null) {
+                    loadGroupChannelsEpgPreview(groupIndexAtRequest);
+                }
+                if (ku9GuideShowing && ku9GuideChannelAdapter != null) {
+                    ku9GuideChannelAdapter.notifyDataSetChanged();
+                }
+            });
+        } catch (Exception e) {
+            FileLogger.write("LivePlay", "preloadCurrentGroupEpg 失败", e);
         }
     }
 
@@ -1807,6 +1836,8 @@ public class LivePlayActivity extends BaseActivity {
         mLastChannelGroupIndex = currentChannelGroupIndex;
         mLastChannelList = new ArrayList<>(newChannels != null ? newChannels : new ArrayList<>());
         if (liveChannelItemAdapter != null) liveChannelItemAdapter.setNewData(newChannels != null ? newChannels : new ArrayList<>());
+        // 复用缓存里的预览数据（如果有）
+        loadGroupChannelsEpgPreview(currentChannelGroupIndex);
     }
 
     private boolean isSameData(List<LiveChannelItem> list1, List<LiveChannelItem> list2) {
@@ -1823,24 +1854,43 @@ public class LivePlayActivity extends BaseActivity {
                     || (mChannelGroupView != null && mChannelGroupView.isComputingLayout())
                     || (mLiveChannelView != null && mLiveChannelView.isComputingLayout())) {
                 mHandler.postDelayed(this, 100);
-            } else {
-                if (tvLeftChannelListLayout != null) tvLeftChannelListLayout.setVisibility(View.VISIBLE);
-                focusCurrentChannelInMenu();
-                if (tvLeftChannelListLayout != null) {
-                    ViewObj viewObj = new ViewObj(tvLeftChannelListLayout, (ViewGroup.MarginLayoutParams) tvLeftChannelListLayout.getLayoutParams());
-                    ObjectAnimator animator = ObjectAnimator.ofObject(viewObj, "marginLeft", new IntEvaluator(), -tvLeftChannelListLayout.getLayoutParams().width, 0);
-                    animator.setDuration(200);
-                    animator.addListener(new AnimatorListenerAdapter() {
-                        @Override public void onAnimationEnd(Animator animation) {
-                            super.onAnimationEnd(animation);
-                            focusCurrentChannelInMenu();
-                            mHandler.removeCallbacks(mHideChannelListRun);
-                            mHandler.postDelayed(mHideChannelListRun, postTimeout);
-                        }
-                    });
-                    animator.start();
-                }
+                return;
             }
+
+            if (tvLeftChannelListLayout == null) return;
+            if (mLeftPanelWidth <= 0) {
+                // 尚未完成测量，稍后再试
+                mHandler.postDelayed(this, 50);
+                return;
+            }
+            // 动画进行中不重复触发
+            if (mLeftPanelAnimating) return;
+
+            tvLeftChannelListLayout.setVisibility(View.VISIBLE);
+            tvLeftChannelListLayout.setTranslationX(-mLeftPanelWidth);
+            focusCurrentChannelInMenu();
+
+            mLeftPanelAnimating = true;
+            tvLeftChannelListLayout.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            ObjectAnimator animator = ObjectAnimator.ofFloat(tvLeftChannelListLayout, "translationX", -mLeftPanelWidth, 0f);
+            animator.setDuration(200);
+            animator.setInterpolator(new DecelerateInterpolator());
+            animator.addListener(new AnimatorListenerAdapter() {
+                @Override public void onAnimationEnd(Animator animation) {
+                    super.onAnimationEnd(animation);
+                    tvLeftChannelListLayout.setTranslationX(0f);
+                    tvLeftChannelListLayout.setLayerType(View.LAYER_TYPE_NONE, null);
+                    mLeftPanelAnimating = false;
+                    focusCurrentChannelInMenu();
+                    mHandler.removeCallbacks(mHideChannelListRun);
+                    mHandler.postDelayed(mHideChannelListRun, postTimeout);
+                }
+                @Override public void onAnimationCancel(Animator animation) {
+                    super.onAnimationCancel(animation);
+                    mLeftPanelAnimating = false;
+                }
+            });
+            animator.start();
         }
     };
 
@@ -1945,20 +1995,35 @@ public class LivePlayActivity extends BaseActivity {
     private Runnable mHideChannelListRun = new Runnable() {
         @Override public void run() {
             if (tvLeftChannelListLayout == null) return;
-            ViewGroup.MarginLayoutParams params = (ViewGroup.MarginLayoutParams) tvLeftChannelListLayout.getLayoutParams();
-            if (tvLeftChannelListLayout.getVisibility() == View.VISIBLE) {
-                ViewObj viewObj = new ViewObj(tvLeftChannelListLayout, params);
-                ObjectAnimator animator = ObjectAnimator.ofObject(viewObj, "marginLeft", new IntEvaluator(), 0, -tvLeftChannelListLayout.getLayoutParams().width);
-                animator.setDuration(200);
-                animator.addListener(new AnimatorListenerAdapter() {
-                    @Override public void onAnimationEnd(Animator animation) {
-                        super.onAnimationEnd(animation);
-                        tvLeftChannelListLayout.setVisibility(View.INVISIBLE);
-                        if (ll_epg != null && tv_curepg_left != null && !"暂无信息".equals(tip_epg1 != null ? tip_epg1.getText().toString() : "")) ll_epg.setVisibility(View.VISIBLE);
-                    }
-                });
-                animator.start();
+            if (tvLeftChannelListLayout.getVisibility() != View.VISIBLE) return;
+            if (mLeftPanelWidth <= 0) {
+                // 没有宽度信息就立即收起，避免卡在半路
+                tvLeftChannelListLayout.setVisibility(View.INVISIBLE);
+                tvLeftChannelListLayout.setTranslationX(0f);
+                if (ll_epg != null && tv_curepg_left != null && !"暂无信息".equals(tip_epg1 != null ? tip_epg1.getText().toString() : "")) ll_epg.setVisibility(View.VISIBLE);
+                return;
             }
+            if (mLeftPanelAnimating) return;
+            mLeftPanelAnimating = true;
+            tvLeftChannelListLayout.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            ObjectAnimator animator = ObjectAnimator.ofFloat(tvLeftChannelListLayout, "translationX", 0f, -mLeftPanelWidth);
+            animator.setDuration(200);
+            animator.setInterpolator(new DecelerateInterpolator());
+            animator.addListener(new AnimatorListenerAdapter() {
+                @Override public void onAnimationEnd(Animator animation) {
+                    super.onAnimationEnd(animation);
+                    tvLeftChannelListLayout.setVisibility(View.INVISIBLE);
+                    tvLeftChannelListLayout.setTranslationX(0f);
+                    tvLeftChannelListLayout.setLayerType(View.LAYER_TYPE_NONE, null);
+                    mLeftPanelAnimating = false;
+                    if (ll_epg != null && tv_curepg_left != null && !"暂无信息".equals(tip_epg1 != null ? tip_epg1.getText().toString() : "")) ll_epg.setVisibility(View.VISIBLE);
+                }
+                @Override public void onAnimationCancel(Animator animation) {
+                    super.onAnimationCancel(animation);
+                    mLeftPanelAnimating = false;
+                }
+            });
+            animator.start();
         }
     };
 
@@ -2273,10 +2338,6 @@ public class LivePlayActivity extends BaseActivity {
         }
     }
 
-    /**
-     * 面板滑出后，使用带重试的 requestRecyclerItemFocus 请求焦点，
-     * 避免子项未完成布局导致 holder 为 null 时焦点丢失。
-     */
     private Runnable mFocusAndShowSettingGroup = new Runnable() {
         @Override public void run() {
             if ((mSettingGroupView != null && mSettingGroupView.isScrolling())
@@ -2290,7 +2351,6 @@ public class LivePlayActivity extends BaseActivity {
                         ? liveSettingGroupAdapter.findPositionByGroupIndex(settingGroupIndex) : 0;
                 if (settingGroupPosition < 0) settingGroupPosition = 0;
 
-                // 使用带重试的聚焦方法
                 if (mSettingGroupView != null) {
                     mSettingGroupView.scrollToPosition(settingGroupPosition);
                     mSettingGroupView.setSelection(settingGroupPosition);
@@ -2307,7 +2367,6 @@ public class LivePlayActivity extends BaseActivity {
                     animator.addListener(new AnimatorListenerAdapter() {
                         @Override public void onAnimationEnd(Animator animation) {
                             super.onAnimationEnd(animation);
-                            // 动画结束后再确认一次焦点
                             requestRecyclerItemFocus(mSettingGroupView, Math.max(0, mSettingGroupView != null ? mSettingGroupView.getSelectedPosition() : 0), 0);
                             mHandler.postDelayed(mHideSettingLayoutRun, postTimeout);
                         }
@@ -2341,19 +2400,31 @@ public class LivePlayActivity extends BaseActivity {
 
     private int livePanelEdgeMargin() { return 0; }
 
+    /**
+     * 计算左侧面板尺寸并保存，同时把初始位置置于屏幕外（translationX）。
+     */
     private void applyKu9ResponsiveSizing() {
         if (tvLeftChannelListLayout == null || ku9ProgramGuide == null) return;
         tvLeftChannelListLayout.post(() -> {
             int w = tvLeftChannelListLayout.getRootView().getWidth();
             int h = tvLeftChannelListLayout.getRootView().getHeight();
-            if (w <= 0 || h <= 0) return;
+            if (w <= 0 || h <= 0) {
+                tvLeftChannelListLayout.postDelayed(this::applyKu9ResponsiveSizing, 50);
+                return;
+            }
             int panelW = Math.round(w * 0.597f);
             int panelH = Math.round(h * 0.952f);
             int marginX = Math.round(w * 0.050f);
             int marginY = Math.round(h * 0.025f);
+
+            mLeftPanelWidth = panelW;
+
             ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) tvLeftChannelListLayout.getLayoutParams();
             lp.width = panelW; lp.height = panelH; lp.leftMargin = marginX; lp.topMargin = marginY;
             lp.rightMargin = 0; lp.bottomMargin = 0; tvLeftChannelListLayout.setLayoutParams(lp);
+            // 默认放在屏幕左侧外
+            tvLeftChannelListLayout.setTranslationX(-panelW);
+
             ViewGroup.MarginLayoutParams gp = (ViewGroup.MarginLayoutParams) ku9ProgramGuide.getLayoutParams();
             gp.width = panelW; gp.height = panelH; gp.leftMargin = marginX; gp.topMargin = marginY;
             gp.rightMargin = 0; gp.bottomMargin = 0; ku9ProgramGuide.setLayoutParams(gp);
@@ -3433,7 +3504,6 @@ public class LivePlayActivity extends BaseActivity {
         titleView.setPadding(0, 0, 0, dp(14));
         container.addView(titleView);
 
-        // 参与方向键导航的所有视图
         final List<View> navViews = new ArrayList<>();
 
         for (int i = 0; i < options.length; i++) {
@@ -3444,7 +3514,6 @@ public class LivePlayActivity extends BaseActivity {
             option.setText(options[i]);
             option.setTextSize(15);
             option.setGravity(Gravity.CENTER);
-            // 让 TextView 可聚焦，遥控器才能把焦点放上去
             option.setFocusable(true);
             option.setFocusableInTouchMode(true);
             option.setClickable(true);
@@ -3486,7 +3555,6 @@ public class LivePlayActivity extends BaseActivity {
         navViews.add(cancel);
         container.addView(cancel);
 
-        // 上下方向键在选项之间移动焦点
         for (int i = 0; i < navViews.size(); i++) {
             final int idx = i;
             navViews.get(i).setOnKeyListener((v, keyCode, event) -> {
@@ -3512,7 +3580,6 @@ public class LivePlayActivity extends BaseActivity {
             dialog.getWindow().setAttributes(wlp);
         }
 
-        // 对话框显示后把焦点落到当前选中项
         dialog.setOnShowListener(d -> {
             if (checked >= 0 && checked < navViews.size()) navViews.get(checked).requestFocus();
         });
@@ -3520,7 +3587,6 @@ public class LivePlayActivity extends BaseActivity {
         dialog.show();
     }
 
-    /** 选项样式：普通 / 已选中 / 获得焦点 三种状态 */
     private void applyDialogOptionStyle(TextView option, boolean selected, boolean focused) {
         int textColor;
         int bgColor;
@@ -3546,7 +3612,6 @@ public class LivePlayActivity extends BaseActivity {
         option.setBackground(itemBg);
     }
 
-    /** 取消按钮样式 */
     private void applyDialogCancelStyle(TextView cancel, boolean focused) {
         android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
         bg.setCornerRadius(dp(8));
@@ -3736,7 +3801,7 @@ public class LivePlayActivity extends BaseActivity {
         activeSourceAdapter = adapter;
         activeSourceData = dataList;
 
-        dialog.setOnDismissListener(d -> {  // 关闭时停止服务器
+        dialog.setOnDismissListener(d -> {
             activeSourceAdapter = null;
             activeSourceData = null;
             stopSubscribeServer();
@@ -3763,8 +3828,6 @@ public class LivePlayActivity extends BaseActivity {
 
         dialog.show();
     }
-
-    // ==================== 订阅 HTTP 服务器实现 ====================
 
     private void startSubscribeServer() {
         if (subscribeServerSocket != null && !subscribeServerSocket.isClosed()) return;
@@ -4510,7 +4573,11 @@ public class LivePlayActivity extends BaseActivity {
         installLiveReconnectListener();
         showTime();
         showNetSpeed();
-        if (tvLeftChannelListLayout != null) tvLeftChannelListLayout.setVisibility(View.INVISIBLE);
+        if (tvLeftChannelListLayout != null) {
+            tvLeftChannelListLayout.setVisibility(View.INVISIBLE);
+            // 重置面板位置到屏幕左侧外
+            if (mLeftPanelWidth > 0) tvLeftChannelListLayout.setTranslationX(-mLeftPanelWidth);
+        }
         if (tvRightSettingLayout != null) tvRightSettingLayout.setVisibility(View.INVISIBLE);
         if (liveChannelGroupAdapter != null) {
             liveChannelGroupAdapter.clearGroupState();
@@ -4533,11 +4600,9 @@ public class LivePlayActivity extends BaseActivity {
 
     private int getDefaultSettingGroupIndex() {
         if (liveSettingGroupList != null && !liveSettingGroupList.isEmpty()) {
-            // 优先选 0 号分组（直播源）
             for (LiveSettingGroup g : liveSettingGroupList) {
                 if (g != null && g.getGroupIndex() == 0) return 0;
             }
-            // 退而求其次：返回列表里第一个有效分组
             for (LiveSettingGroup g : liveSettingGroupList) {
                 if (g != null) return g.getGroupIndex();
             }
@@ -4562,7 +4627,6 @@ public class LivePlayActivity extends BaseActivity {
             }
         }
 
-        // 逐个检查 0~6，缺哪个补哪个（不再依赖 isEmpty 判断）
         boolean has0 = findSettingGroupByIndex(0) != null;
         boolean has1 = findSettingGroupByIndex(1) != null;
         boolean has2 = findSettingGroupByIndex(2) != null;
