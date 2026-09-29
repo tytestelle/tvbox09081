@@ -196,6 +196,8 @@ public class LivePlayActivity extends BaseActivity {
 
     // ===== 分组 EPG 批量抓取 =====
     private final ExecutorService mEpgGroupExecutor = Executors.newSingleThreadExecutor();
+    /** 频道列表 EPG 预览计算的共享线程池，避免每次 newSingleThreadExecutor。 */
+    private final ExecutorService mPreviewExecutor = Executors.newSingleThreadExecutor();
     private volatile int mGroupEpgRequestId = 0;
 
     private final Runnable mKu9DateWatchRun = new Runnable() {
@@ -1771,6 +1773,7 @@ public class LivePlayActivity extends BaseActivity {
         cancelLiveReconnect();
         stopSubscribeServer();
         try { mEpgGroupExecutor.shutdownNow(); } catch (Throwable ignored) { }
+        try { mPreviewExecutor.shutdownNow(); } catch (Throwable ignored) { }
         super.onDestroy();
         try { unregisterReceiver(liveRefreshReceiver); } catch (Exception e) { }
         Hawk.put(HawkConfig.PLAYER_IS_LIVE, false);
@@ -5146,7 +5149,7 @@ public class LivePlayActivity extends BaseActivity {
         dayFmt.setTimeZone(TimeZone.getTimeZone("GMT+8:00"));
         final String dateStr = dayFmt.format(today);
 
-        Executors.newSingleThreadExecutor().execute(() -> {
+        mPreviewExecutor.execute(() -> {
             final ArrayList<String[]> previews = new ArrayList<>();
             EpgManager manager = EpgManager.getInstance(LivePlayActivity.this);
             for (LiveChannelItem item : channels) {
