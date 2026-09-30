@@ -50,25 +50,25 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 /**
- * XMLTV EPG manager —— 极简匹配版
+ * XMLTV EPG manager —— 严格精确匹配版
  *
- * 【匹配流程】
- *   1) 原始频道名（不做任何处理）→ 直接在 epg_data.json 的 name 变体列表里精确查找
- *      （name 字段是逗号分隔的变体列表，例："驚豔成人電影台,驚豔成人電影台 HD,驚豔成人電影台 超清"）
- *      命中 → 得到 epgid
+ * 【匹配流程（不做任何字符处理）】
+ *   1) 原始频道名 → 直接在 epg_data.json 的 name 变体列表里精确查找 → 得到 epgid
+ *      （name 是逗号分隔的变体列表，例如
+ *       "驚豔成人電影台,驚豔成人電影台 HD,驚豔成人電影台 超清,驚豔成人電影台 高清"）
  *   2) epg_data.json 找不到 → 直接把原始频道名当作 epgid
- *   3) 用 epgid 去 XMLTV 找 <display-name> 精确匹配（trim 后 equal）
- *      · display-name 等于 epgid  或者  display-name 等于某个变体名（其 epgid 在请求集合里）
- *   4) 匹配到的所有 XMLTV channel 归入同一 epgid，programme 全部合并
- *   5) 用 <channel id> 找 programme，用 <icon src> 拿台标，透明化后存为 epgid.png
+ *   3) 用 epgid 去 XMLTV 找 <display-name> 精确匹配（trim 后 equals）：
+ *      · display-name 精确等于某个 requested epgid   → 命中
+ *      · display-name 是 epg_data.json 里的某个变体名，
+ *        且其 epgid 也在 requested 里                → 命中
+ *   4) 一个 epgid 命中多个 XMLTV channel 时，programmes 全部合并
+ *   5) <icon src> 作为台标 url，透明化后保存为 epgid.png
  *
  * 【不做任何名字处理】
- *   · 不去空格、不去横杠、不转大写、不做归一化
- *   · 不推导候选名
- *   · epg_data.json 的 name 已经列全了所有变体，精确匹配即可
+ *   不去空格、不去横杠、不转大写、不做归一化、不推导候选
  *
- * 【增量合并】parseXmlForEpgIds 不再清空已有缓存，只做 merge。
- * 【分批台标】每 250ms 只发 2 个下载任务，避免点击分组时卡顿。
+ * 【增量合并】parseXmlForEpgIds 只 merge，不清空已有缓存
+ * 【分批台标】每 250ms 只发 2 个下载任务
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -111,25 +111,18 @@ public class EpgManager {
     private volatile boolean refreshRunning;
     private final List<RefreshCallback> pendingRefreshCallbacks = new ArrayList<>();
 
-    // ===== 映射表 =====
-    /** 变体名 → epgid（直接从 epg_data.json 的 name 字段拆分，不做任何处理） */
+    // ===== 映射表：变体名 → epgid（直接从 epg_data.json 的 name 拆分，不做任何处理） =====
     private final Map<String, String> nameToEpgId = new HashMap<>();
-    /** 动态回填：原始频道名 → epgid（当原始名不在 epg_data.json 时，用户手动或运行期写入） */
     private final Map<String, String> dynamicEpgIds = new HashMap<>();
 
     private final Set<String> pendingEpgWarmup = Collections.synchronizedSet(new LinkedHashSet<>());
 
     // ===== XMLTV 解析后索引 =====
     private final Object parseLock = new Object();
-    /** epgid → 该 epgid 命中的所有 XMLTV channel id */
     private final Map<String, List<String>> xmlChannelIdsByEpgId = new HashMap<>();
-    /** XMLTV channel id → 该 channel 的所有 programme */
     private final Map<String, List<EpgProgram>> programsByChannelId = new HashMap<>();
-    /** epgid → 合并后的所有 programme */
     private final Map<String, List<EpgProgram>> programsByEpgId = new HashMap<>();
-    /** epgid → 台标 url */
     private final Map<String, String> iconUrlByEpgId = new HashMap<>();
-    /** 已加载的 epgid 集合（只增不减，除非 hash 变化时整体清空） */
     private final Set<String> loadedEpgIds = new HashSet<>();
 
     private volatile boolean epgDataRefreshRunning = false;
@@ -186,7 +179,7 @@ public class EpgManager {
     }
 
     // ==================================================================
-    // epg_data.json 加载 —— 只建立 变体名 → epgid 的精确映射
+    // epg_data.json 加载：变体名 → epgid 精确映射
     // ==================================================================
     private void loadEpgDataMap() {
         synchronized (nameToEpgId) {
@@ -259,9 +252,7 @@ public class EpgManager {
                 String remoteHash = fetchRemoteHash(hashUrl);
                 if (TextUtils.isEmpty(remoteHash)) return;
                 String localHash = readText(epgDataHashFile);
-                if (remoteHash.equals(localHash) && epgDataCacheFile.exists() && epgDataCacheFile.length() > 0) {
-                    return;
-                }
+                if (remoteHash.equals(localHash) && epgDataCacheFile.exists() && epgDataCacheFile.length() > 0) return;
                 Request request = new Request.Builder().url(EPG_DATA_REMOTE_URL)
                         .header("Cache-Control", "no-cache").get().build();
                 try (Response response = httpClient.newCall(request).execute()) {
@@ -310,7 +301,7 @@ public class EpgManager {
     }
 
     // ==================================================================
-    // 动态 EPG ID 映射
+    // 动态映射文件
     // ==================================================================
     private void loadDynamicEpgIds() {
         synchronized (dynamicEpgIds) {
@@ -350,10 +341,10 @@ public class EpgManager {
     }
 
     /**
-     * 从原始频道名找 epgid：
-     *   1) 直接在 nameToEpgId（epg_data.json 的 name 变体）里精确查
-     *   2) 再查 dynamicEpgIds（用户手动/历史遗留）
-     *   3) 都没有 → null
+     * 从原始频道名找 epgid（不做任何处理）：
+     *   1) nameToEpgId（epg_data.json 的 name 变体）精确查
+     *   2) dynamicEpgIds 精确查
+     *   3) 都没有 → 返回 null
      */
     private String getEpgIdByChannelName(String channelName) {
         if (TextUtils.isEmpty(channelName)) return null;
@@ -404,7 +395,7 @@ public class EpgManager {
     }
 
     // ==================================================================
-    // 下载 XMLTV
+    // 下载 / 刷新 XMLTV
     // ==================================================================
     public void refreshEpg(RefreshCallback callback) {
         final String url = epgUrl;
@@ -520,19 +511,14 @@ public class EpgManager {
     }
 
     // ==================================================================
-    // 核心：解析 XMLTV，把匹配到的 channel 归入对应的 epgid
-    //
-    // 匹配规则（全部为 trim 后精确匹配，不做任何字符处理）：
-    //   1) display-name 精确等于 requested epgid
-    //   2) display-name 是 epg_data.json 的某个变体名，且其 epgid 在 requested 里
-    //   3) display-name 是某个动态映射的键，且其值在 requested 里
+    // 核心：解析 XMLTV，把匹配到的 channel 归入对应 epgid
+    // 匹配规则全部是 trim 后精确匹配，不做任何字符处理
     // ==================================================================
     private boolean parseXmlForEpgIds(File file, Set<String> requestedEpgIds) {
         if (requestedEpgIds == null || requestedEpgIds.isEmpty()) return true;
 
         synchronized (parseLock) {
             try {
-                // ===== 第一遍：解析 <channel>，确定每个 XMLTV channel 归属哪个 epgid =====
                 final Map<String, List<EpgProgram>> newPrograms = new HashMap<>();
                 final Map<String, List<String>> idsByEpgId = new HashMap<>();
                 final Map<String, String> iconUrlByEpgIdNew = new HashMap<>();
@@ -582,7 +568,6 @@ public class EpgManager {
                     }
                 }
 
-                // ===== 第二遍：解析 <programme>，只保留想要的 channel =====
                 parser = factory.newPullParser();
                 try (InputStream input = new FileInputStream(file)) {
                     parser.setInput(input, null);
@@ -638,7 +623,6 @@ public class EpgManager {
                         if (!existing.contains(id)) existing.add(id);
                     }
                 }
-                // 重建合并后的 programmesByEpgId
                 for (Map.Entry<String, List<String>> entry : idsByEpgId.entrySet()) {
                     String epgid = entry.getKey();
                     List<String> allChannelIds = xmlChannelIdsByEpgId.get(epgid);
@@ -659,7 +643,6 @@ public class EpgManager {
                             + " programmes=" + merged.size()
                             + " dates=" + buildProgramDateKeys(merged));
                 }
-                // 台标 url（只补充不覆盖）
                 for (Map.Entry<String, String> e : iconUrlByEpgIdNew.entrySet()) {
                     if (!iconUrlByEpgId.containsKey(e.getKey())) iconUrlByEpgId.put(e.getKey(), e.getValue());
                 }
@@ -679,7 +662,7 @@ public class EpgManager {
     }
 
     /**
-     * 对单个 XMLTV channel 的所有 display-name，尝试匹配到 requestedEpgIds 里的某个 epgid。
+     * 对单个 XMLTV channel 的所有 display-name 尝试匹配到 requestedEpgIds 里的某个 epgid。
      * 全部为 trim 后精确匹配，不做任何字符处理。
      */
     private String matchChannelToEpgId(List<String> displayNames, Set<String> requestedEpgIds) {
@@ -691,14 +674,14 @@ public class EpgManager {
             if (requestedEpgIds.contains(dnTrim)) return dnTrim;
         }
 
-        // 规则 2：display-name 精确等于 epg_data.json 的变体名，且其 epgid 在 requested 里
+        // 规则 2：display-name 精确等于 epg_data.json 里某变体名，且其 epgid 在 requested 里
         for (String dn : displayNames) {
             String dnTrim = dn.trim();
             String epgid = nameToEpgId.get(dnTrim);
             if (epgid != null && requestedEpgIds.contains(epgid)) return epgid;
         }
 
-        // 规则 3：display-name 精确等于动态映射的键，且其值在 requested 里
+        // 规则 3：display-name 精确等于动态映射的 key，且其值在 requested 里
         for (String dn : displayNames) {
             String dnTrim = dn.trim();
             synchronized (dynamicEpgIds) {
@@ -711,7 +694,7 @@ public class EpgManager {
     }
 
     // ==================================================================
-    // 分组 EPG 预热
+    // 分组预热
     // ==================================================================
     private final Runnable epgWarmupTask = new Runnable() {
         @Override public void run() {
@@ -740,7 +723,6 @@ public class EpgManager {
         mainHandler.postDelayed(epgWarmupTask, EPG_WARMUP_DELAY_MS);
     }
 
-    /** 分批下载台标 */
     private void scheduleIconWarmup(List<String> channelNames) {
         final int gen = ++iconWarmupGeneration;
         final List<String> list = new ArrayList<>();
@@ -760,7 +742,7 @@ public class EpgManager {
 
     /**
      * 加载指定频道列表的 EPG。
-     * 直接用原始名去 nameToEpgId 查 epgid；查不到就用原始名当 epgid。
+     * 直接用原始频道名去 nameToEpgId 精确查 epgid；查不到就用原始名当 epgid。
      */
     public void loadChannelGroup(final List<String> channelNames, final Runnable onComplete) {
         if (channelNames == null || channelNames.isEmpty()) {
@@ -808,7 +790,7 @@ public class EpgManager {
         List<EpgProgram> result = new ArrayList<>();
         if (TextUtils.isEmpty(channelName) || !parsed) return result;
         String epgid = getEpgIdByChannelName(channelName);
-        if (TextUtils.isEmpty(epgid)) epgid = channelName;  // 用原始名当 epgid
+        if (TextUtils.isEmpty(epgid)) epgid = channelName;
         synchronized (parseLock) {
             List<String> ids = xmlChannelIdsByEpgId.get(epgid);
             if (ids == null || ids.isEmpty()) return result;
@@ -854,7 +836,6 @@ public class EpgManager {
             if (callback != null) mainHandler.post(() -> callback.onIcon(null));
             return;
         }
-        // epgid 直接用原始名或映射到的值
         String mapped = getEpgIdByChannelName(channelName);
         final String epgid = TextUtils.isEmpty(mapped) ? channelName : mapped;
 
@@ -984,7 +965,7 @@ public class EpgManager {
     }
 
     // ==================================================================
-    // 日期/节目查询
+    // 日期 / 节目查询
     // ==================================================================
     public List<Date> getAvailableDatesForChannel(String channelName) {
         List<Date> result = new ArrayList<>();
