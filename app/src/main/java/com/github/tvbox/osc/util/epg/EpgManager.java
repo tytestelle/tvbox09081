@@ -5,6 +5,8 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.os.AsyncTask;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 
 import com.github.tvbox.osc.util.FileLogger;
@@ -38,8 +40,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
-import android.os.Handler;
-import android.os.Looper;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -50,12 +50,25 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 /**
- * XMLTV EPG manager.
+ * XMLTV EPG manager —— 极简匹配版
  *
- * 【本次修复】
- *   1) parseXmlForEpgIds 从「清空重建」改为「增量合并」；
- *   2) loadChannelGroup 判重从 equals 改为 containsAll；
- *   3) 台标预热改成分批下载 scheduleIconWarmup，避免点击分组时卡顿。
+ * 【匹配流程】
+ *   1) 原始频道名（不做任何处理）→ 直接在 epg_data.json 的 name 变体列表里精确查找
+ *      （name 字段是逗号分隔的变体列表，例："驚豔成人電影台,驚豔成人電影台 HD,驚豔成人電影台 超清"）
+ *      命中 → 得到 epgid
+ *   2) epg_data.json 找不到 → 直接把原始频道名当作 epgid
+ *   3) 用 epgid 去 XMLTV 找 <display-name> 精确匹配（trim 后 equal）
+ *      · display-name 等于 epgid  或者  display-name 等于某个变体名（其 epgid 在请求集合里）
+ *   4) 匹配到的所有 XMLTV channel 归入同一 epgid，programme 全部合并
+ *   5) 用 <channel id> 找 programme，用 <icon src> 拿台标，透明化后存为 epgid.png
+ *
+ * 【不做任何名字处理】
+ *   · 不去空格、不去横杠、不转大写、不做归一化
+ *   · 不推导候选名
+ *   · epg_data.json 的 name 已经列全了所有变体，精确匹配即可
+ *
+ * 【增量合并】parseXmlForEpgIds 不再清空已有缓存，只做 merge。
+ * 【分批台标】每 250ms 只发 2 个下载任务，避免点击分组时卡顿。
  */
 public class EpgManager {
     private static final String TAG = "EpgManager";
@@ -94,27 +107,32 @@ public class EpgManager {
     private final File epgDataHashFile;
 
     private volatile String epgUrl;
-    private volatile boolean parsing;
     private volatile boolean parsed;
     private volatile boolean refreshRunning;
     private final List<RefreshCallback> pendingRefreshCallbacks = new ArrayList<>();
 
+    // ===== 映射表 =====
+    /** 变体名 → epgid（直接从 epg_data.json 的 name 字段拆分，不做任何处理） */
     private final Map<String, String> nameToEpgId = new HashMap<>();
+    /** 动态回填：原始频道名 → epgid（当原始名不在 epg_data.json 时，用户手动或运行期写入） */
     private final Map<String, String> dynamicEpgIds = new HashMap<>();
+
     private final Set<String> pendingEpgWarmup = Collections.synchronizedSet(new LinkedHashSet<>());
 
+    // ===== XMLTV 解析后索引 =====
     private final Object parseLock = new Object();
-    private final Map<String, ChannelInfo> channelsByDisplayName = new HashMap<>();
-    private final Map<String, ChannelInfo> channelsById = new HashMap<>();
-    private final Map<String, List<EpgProgram>> programsByChannelId = new HashMap<>();
+    /** epgid → 该 epgid 命中的所有 XMLTV channel id */
     private final Map<String, List<String>> xmlChannelIdsByEpgId = new HashMap<>();
+    /** XMLTV channel id → 该 channel 的所有 programme */
+    private final Map<String, List<EpgProgram>> programsByChannelId = new HashMap<>();
+    /** epgid → 合并后的所有 programme */
     private final Map<String, List<EpgProgram>> programsByEpgId = new HashMap<>();
+    /** epgid → 台标 url */
     private final Map<String, String> iconUrlByEpgId = new HashMap<>();
+    /** 已加载的 epgid 集合（只增不减，除非 hash 变化时整体清空） */
     private final Set<String> loadedEpgIds = new HashSet<>();
 
     private volatile boolean epgDataRefreshRunning = false;
-
-    /** 台标预热任务的 generation，用来在切换分组时作废旧任务。 */
     private volatile int iconWarmupGeneration = 0;
 
     private static final String LOGO_PREFS = "logo_settings";
@@ -167,43 +185,42 @@ public class EpgManager {
         refreshEpgDataFromRemote();
     }
 
-    // ======================== epg_data.json ========================
+    // ==================================================================
+    // epg_data.json 加载 —— 只建立 变体名 → epgid 的精确映射
+    // ==================================================================
     private void loadEpgDataMap() {
         synchronized (nameToEpgId) {
             nameToEpgId.clear();
+
             InputStream is = null;
             String source;
             try {
-                if (epgDataCacheFile != null
-                        && epgDataCacheFile.exists()
-                        && epgDataCacheFile.length() > 0) {
+                if (epgDataCacheFile != null && epgDataCacheFile.exists() && epgDataCacheFile.length() > 0) {
                     is = new FileInputStream(epgDataCacheFile);
-                    source = "本地缓存(" + epgDataCacheFile.getAbsolutePath() + ")";
+                    source = "本地缓存";
                 } else {
                     is = context.getAssets().open("epg_data.json");
                     source = "内置 assets";
                 }
-                JsonObject root = JsonParser.parseReader(
-                        new InputStreamReader(is, StandardCharsets.UTF_8)).getAsJsonObject();
+                JsonObject root = JsonParser.parseReader(new InputStreamReader(is, StandardCharsets.UTF_8)).getAsJsonObject();
                 JsonArray epgs = root.getAsJsonArray("epgs");
-                if (epgs == null) return;
-                for (int i = 0; i < epgs.size(); i++) {
-                    JsonObject item = epgs.get(i).getAsJsonObject();
-                    if (!item.has("epgid") || !item.has("name")) continue;
-                    String epgid = item.get("epgid").getAsString().trim();
-                    String names = item.get("name").getAsString();
-                    if (epgid.isEmpty() || names == null) continue;
-                    for (String variant : names.split(",")) {
-                        String key = variant == null ? "" : variant.trim();
-                        if (!key.isEmpty()) nameToEpgId.put(key, epgid);
+                if (epgs != null) {
+                    for (int i = 0; i < epgs.size(); i++) {
+                        JsonObject item = epgs.get(i).getAsJsonObject();
+                        if (!item.has("epgid") || !item.has("name")) continue;
+                        String epgid = item.get("epgid").getAsString().trim();
+                        String names = item.get("name").getAsString();
+                        if (epgid.isEmpty() || names == null) continue;
+                        for (String variant : names.split(",")) {
+                            String key = variant == null ? "" : variant.trim();
+                            if (key.isEmpty()) continue;
+                            nameToEpgId.put(key, epgid);
+                        }
                     }
                 }
-                FileLogger.write(TAG, "加载 epg_data.json 成功[" + source + "]，共 "
-                        + nameToEpgId.size() + " 个频道变种");
+                FileLogger.write(TAG, "加载 epg_data.json 成功[" + source + "]，变体=" + nameToEpgId.size());
             } catch (Exception e) {
-                FileLogger.write(TAG, "加载 epg_data.json 失败[" +
-                        (epgDataCacheFile != null && epgDataCacheFile.exists() ? "缓存" : "assets") +
-                        "]，尝试回退 assets", e);
+                FileLogger.write(TAG, "加载 epg_data.json 失败[" + source + "]，尝试回退 assets", e);
                 if (epgDataCacheFile != null && epgDataCacheFile.exists()) {
                     try { epgDataCacheFile.delete(); } catch (Exception ignored) { }
                     try (InputStream fallback = context.getAssets().open("epg_data.json")) {
@@ -222,7 +239,6 @@ public class EpgManager {
                                 }
                             }
                         }
-                        FileLogger.write(TAG, "回退 assets 成功，共 " + nameToEpgId.size() + " 个频道变种");
                     } catch (Exception ignored) { }
                 }
             } finally {
@@ -231,83 +247,43 @@ public class EpgManager {
         }
     }
 
-    // ======================== epg_data.json 远程同步 ========================
+    // ==================================================================
+    // 远程同步 epg_data.json
+    // ==================================================================
     public void refreshEpgDataFromRemote() {
-        if (epgDataRefreshRunning) {
-            FileLogger.write(TAG, "epg_data.json 远程同步正在进行中，跳过");
-            return;
-        }
+        if (epgDataRefreshRunning) return;
         epgDataRefreshRunning = true;
         epgExecutor.execute(() -> {
             try {
                 final String hashUrl = EPG_DATA_REMOTE_URL + ".hash";
-                FileLogger.write(TAG, "epg_data.json 哈希检查开始: hashUrl=" + hashUrl);
                 String remoteHash = fetchRemoteHash(hashUrl);
-                if (TextUtils.isEmpty(remoteHash)) {
-                    FileLogger.write(TAG, "远程 epg_data.json 哈希获取失败，跳过更新");
-                    return;
-                }
-
+                if (TextUtils.isEmpty(remoteHash)) return;
                 String localHash = readText(epgDataHashFile);
-                FileLogger.write(TAG, "epg_data.json 哈希比对: remote=" + remoteHash
-                        + ", local=" + (TextUtils.isEmpty(localHash) ? "<empty>" : localHash));
-
-                if (remoteHash.equals(localHash)
-                        && epgDataCacheFile.exists()
-                        && epgDataCacheFile.length() > 0) {
-                    FileLogger.write(TAG, "epg_data.json 哈希未变化，无需更新");
+                if (remoteHash.equals(localHash) && epgDataCacheFile.exists() && epgDataCacheFile.length() > 0) {
                     return;
                 }
-
-                FileLogger.write(TAG, "epg_data.json 哈希已变化或本地文件不存在，开始下载: "
-                        + EPG_DATA_REMOTE_URL);
-                Request request = new Request.Builder()
-                        .url(EPG_DATA_REMOTE_URL)
-                        .header("Cache-Control", "no-cache")
-                        .get()
-                        .build();
+                Request request = new Request.Builder().url(EPG_DATA_REMOTE_URL)
+                        .header("Cache-Control", "no-cache").get().build();
                 try (Response response = httpClient.newCall(request).execute()) {
-                    if (!response.isSuccessful() || response.body() == null) {
-                        FileLogger.write(TAG, "远程 epg_data.json 拉取失败 HTTP " + response.code());
-                        return;
-                    }
+                    if (!response.isSuccessful() || response.body() == null) return;
                     byte[] data = response.body().bytes();
-                    if (data == null || data.length == 0) {
-                        FileLogger.write(TAG, "远程 epg_data.json 内容为空，跳过");
-                        return;
-                    }
-
+                    if (data == null || data.length == 0) return;
                     JsonObject remoteRoot;
                     try {
                         remoteRoot = JsonParser.parseReader(new InputStreamReader(
-                                new ByteArrayInputStream(data),
-                                StandardCharsets.UTF_8)).getAsJsonObject();
-                    } catch (Exception e) {
-                        FileLogger.write(TAG, "远程 epg_data.json 不是合法 JSON，跳过", e);
-                        return;
-                    }
-                    if (remoteRoot.getAsJsonArray("epgs") == null) {
-                        FileLogger.write(TAG, "远程 epg_data.json 缺少 epgs 字段，跳过");
-                        return;
-                    }
+                                new ByteArrayInputStream(data), StandardCharsets.UTF_8)).getAsJsonObject();
+                    } catch (Exception e) { return; }
+                    if (remoteRoot.getAsJsonArray("epgs") == null) return;
 
                     File tmp = new File(context.getFilesDir(), EPG_DATA_CACHE_FILE + ".tmp");
                     try (FileOutputStream out = new FileOutputStream(tmp)) {
-                        out.write(data);
-                        out.flush();
+                        out.write(data); out.flush();
                         try { out.getFD().sync(); } catch (Exception ignored) { }
                     }
                     if (epgDataCacheFile.exists()) epgDataCacheFile.delete();
-                    if (!tmp.renameTo(epgDataCacheFile)) {
-                        copyFile(tmp, epgDataCacheFile);
-                        tmp.delete();
-                    }
-
+                    if (!tmp.renameTo(epgDataCacheFile)) { copyFile(tmp, epgDataCacheFile); tmp.delete(); }
                     writeTextAtomically(epgDataHashFile, remoteHash);
-
-                    FileLogger.write(TAG, "远程 epg_data.json 已更新，size=" + data.length
-                            + "，hash=" + remoteHash + "，即将重新加载映射");
-
+                    FileLogger.write(TAG, "远程 epg_data.json 已更新，size=" + data.length);
                     loadEpgDataMap();
                     pruneDynamicEpgIds();
                 }
@@ -326,21 +302,16 @@ public class EpgManager {
             while (it.hasNext()) {
                 Map.Entry<String, String> e = it.next();
                 String staticHit;
-                synchronized (nameToEpgId) {
-                    staticHit = nameToEpgId.get(e.getKey());
-                }
-                if (staticHit != null) {
-                    FileLogger.write(TAG, "动态映射已被母版覆盖，移除: name=["
-                            + e.getKey() + "] -> [" + staticHit + "]");
-                    it.remove();
-                    changed = true;
-                }
+                synchronized (nameToEpgId) { staticHit = nameToEpgId.get(e.getKey()); }
+                if (staticHit != null) { it.remove(); changed = true; }
             }
         }
         if (changed) saveDynamicEpgIds();
     }
 
-    // ======================== 动态 EPG ID 映射 ========================
+    // ==================================================================
+    // 动态 EPG ID 映射
+    // ==================================================================
     private void loadDynamicEpgIds() {
         synchronized (dynamicEpgIds) {
             dynamicEpgIds.clear();
@@ -352,14 +323,9 @@ public class EpgManager {
                     if (!e.getValue().isJsonPrimitive()) continue;
                     String key = e.getKey().trim();
                     String value = e.getValue().getAsString();
-                    if (!key.isEmpty() && !TextUtils.isEmpty(value)) {
-                        dynamicEpgIds.put(key, value.trim());
-                    }
+                    if (!key.isEmpty() && !TextUtils.isEmpty(value)) dynamicEpgIds.put(key, value.trim());
                 }
-                FileLogger.write(TAG, "加载动态 EPG 映射成功，共 " + dynamicEpgIds.size() + " 条");
-            } catch (Exception e) {
-                FileLogger.write(TAG, "加载动态 EPG 映射失败", e);
-            }
+            } catch (Exception e) { FileLogger.write(TAG, "加载动态 EPG 映射失败", e); }
         }
     }
 
@@ -378,34 +344,17 @@ public class EpgManager {
                     try { out.getFD().sync(); } catch (Exception ignored) { }
                 }
                 if (dynamicEpgIdsFile.exists()) dynamicEpgIdsFile.delete();
-                if (!tmp.renameTo(dynamicEpgIdsFile)) {
-                    copyFile(tmp, dynamicEpgIdsFile);
-                    tmp.delete();
-                }
-                FileLogger.write(TAG, "动态 EPG 映射已保存，共 " + dynamicEpgIds.size() + " 条");
-            } catch (Exception e) {
-                FileLogger.write(TAG, "保存动态 EPG 映射失败", e);
-            }
+                if (!tmp.renameTo(dynamicEpgIdsFile)) { copyFile(tmp, dynamicEpgIdsFile); tmp.delete(); }
+            } catch (Exception e) { FileLogger.write(TAG, "保存动态 EPG 映射失败", e); }
         }
     }
 
-    private List<String> deriveEpgIdCandidates(String channelName) {
-        List<String> candidates = new ArrayList<>();
-        if (TextUtils.isEmpty(channelName)) return candidates;
-        String name = channelName.trim();
-        if (name.isEmpty()) return candidates;
-
-        candidates.add(name);
-
-        if (name.length() > 1 && name.endsWith("台")) {
-            String without = name.substring(0, name.length() - 1).trim();
-            if (!without.isEmpty() && !without.equals(name)) {
-                candidates.add(without);
-            }
-        }
-        return candidates;
-    }
-
+    /**
+     * 从原始频道名找 epgid：
+     *   1) 直接在 nameToEpgId（epg_data.json 的 name 变体）里精确查
+     *   2) 再查 dynamicEpgIds（用户手动/历史遗留）
+     *   3) 都没有 → null
+     */
     private String getEpgIdByChannelName(String channelName) {
         if (TextUtils.isEmpty(channelName)) return null;
         synchronized (nameToEpgId) {
@@ -421,6 +370,9 @@ public class EpgManager {
         return getEpgIdByChannelName(originalChannelName);
     }
 
+    // ==================================================================
+    // URL 管理
+    // ==================================================================
     public synchronized void setEpgUrl(String url) {
         epgUrl = normalizeEpgUrl(url);
         if (!TextUtils.isEmpty(epgUrl)) EpgSettings.saveEpgUrl(context, epgUrl);
@@ -434,7 +386,6 @@ public class EpgManager {
         return value;
     }
 
-    // ======================== 默认 EPG URL ========================
     private void loadDefaultEpgUrl() {
         try (InputStream is = context.getAssets().open("configuration.json")) {
             JsonObject config = JsonParser.parseReader(new InputStreamReader(is, StandardCharsets.UTF_8)).getAsJsonObject();
@@ -447,17 +398,14 @@ public class EpgManager {
                 if (trimmed.isEmpty()) continue;
                 int idx = trimmed.lastIndexOf('$');
                 String url = idx > 0 ? trimmed.substring(0, idx).trim() : trimmed;
-                if (!url.isEmpty()) {
-                    setEpgUrl(url);
-                    return;
-                }
+                if (!url.isEmpty()) { setEpgUrl(url); return; }
             }
-        } catch (Exception e) {
-            FileLogger.write(TAG, "加载默认 EPG URL 失败", e);
-        }
+        } catch (Exception e) { FileLogger.write(TAG, "加载默认 EPG URL 失败", e); }
     }
 
-    // ======================== HASH + 下载 ========================
+    // ==================================================================
+    // 下载 XMLTV
+    // ==================================================================
     public void refreshEpg(RefreshCallback callback) {
         final String url = epgUrl;
         if (TextUtils.isEmpty(url)) {
@@ -470,10 +418,7 @@ public class EpgManager {
             refreshRunning = true;
         }
         new AsyncTask<Void, Void, RefreshResult>() {
-            @Override protected RefreshResult doInBackground(Void... ignored) {
-                return refreshFromHash(url);
-            }
-
+            @Override protected RefreshResult doInBackground(Void... ignored) { return refreshFromHash(url); }
             @Override protected void onPostExecute(RefreshResult result) {
                 List<RefreshCallback> callbacks;
                 synchronized (EpgManager.this) {
@@ -493,49 +438,33 @@ public class EpgManager {
 
     private RefreshResult refreshFromHash(String url) {
         try {
-            if (!epgDir.exists() && !epgDir.mkdirs()) {
-                return RefreshResult.error("无法创建 EPG 缓存目录");
-            }
-
+            if (!epgDir.exists() && !epgDir.mkdirs()) return RefreshResult.error("无法创建 EPG 缓存目录");
             final String hashUrl = url + ".hash";
-            FileLogger.write(TAG, "EPG检查开始: url=" + url + ", hash=" + hashUrl);
             String remoteHash = fetchRemoteHash(hashUrl);
             String localHash = readText(localHashFile);
-            FileLogger.write(TAG, "EPG hash: remote=" + (TextUtils.isEmpty(remoteHash) ? "<empty>" : remoteHash) + ", local=" + (TextUtils.isEmpty(localHash) ? "<empty>" : localHash));
 
             if (!TextUtils.isEmpty(remoteHash) && epgFile.exists() && remoteHash.equals(localHash)) {
-                FileLogger.write(TAG, "EPG hash 未变化，直接使用本地文件（不解析全量 XML）: " + epgFile.getAbsolutePath());
                 return RefreshResult.ok();
             }
+            if (TextUtils.isEmpty(remoteHash) && epgFile.exists()) return RefreshResult.ok();
 
-            if (TextUtils.isEmpty(remoteHash) && epgFile.exists()) {
-                FileLogger.write(TAG, "EPG hash 获取失败，继续使用已有 EPG 本地文件（不全量解析）");
-                return RefreshResult.ok();
-            }
-
-            FileLogger.write(TAG, "EPG hash 已变化或本地文件不存在，开始下载 XMLTV: " + url);
             File tmp = new File(epgDir, EPG_FILE_NAME + ".tmp");
             downloadXmlToFile(url, tmp);
             if (!tmp.exists() || tmp.length() == 0) return RefreshResult.error("EPG 文件下载为空");
 
-            if (!tmp.renameTo(epgFile)) {
-                copyFile(tmp, epgFile);
-                tmp.delete();
-            }
+            if (!tmp.renameTo(epgFile)) { copyFile(tmp, epgFile); tmp.delete(); }
             if (!TextUtils.isEmpty(remoteHash)) writeTextAtomically(localHashFile, remoteHash);
 
-            // XML 文件已更新 → 必须整体清空缓存，下次按需重新解析
+            // XML 文件已更新 → 整体清空缓存
             synchronized (parseLock) {
-                channelsByDisplayName.clear();
-                channelsById.clear();
+                xmlChannelIdsByEpgId.clear();
                 programsByChannelId.clear();
                 programsByEpgId.clear();
-                xmlChannelIdsByEpgId.clear();
                 iconUrlByEpgId.clear();
                 loadedEpgIds.clear();
                 parsed = false;
             }
-            FileLogger.write(TAG, "EPG 下载成功，等待按频道组懒加载: " + epgFile.getAbsolutePath());
+            FileLogger.write(TAG, "EPG 下载成功，等待按需懒加载");
             return RefreshResult.ok();
         } catch (Exception e) {
             FileLogger.write(TAG, "EPG 刷新异常", e);
@@ -551,25 +480,19 @@ public class EpgManager {
                 if (!response.isSuccessful() || response.body() == null) return "";
                 return response.body().string().trim();
             }
-        } catch (Exception e) {
-            FileLogger.write(TAG, "获取 EPG hash 失败: " + hashUrl, e);
-            return "";
-        }
+        } catch (Exception e) { return ""; }
     }
 
     private void downloadXmlToFile(String url, File target) throws Exception {
         Request request = new Request.Builder().url(url).get().build();
         try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful() || response.body() == null) {
-                throw new IllegalStateException("HTTP " + response.code());
-            }
+            if (!response.isSuccessful() || response.body() == null) throw new IllegalStateException("HTTP " + response.code());
             try (InputStream in = response.body().byteStream(); OutputStream out = new FileOutputStream(target)) {
                 byte[] buffer = new byte[32 * 1024];
                 int n;
                 while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
             }
         }
-
         if (isGzip(target)) {
             File xmlTmp = new File(epgDir, EPG_FILE_NAME + ".unzipped.tmp");
             try (GZIPInputStream in = new GZIPInputStream(new FileInputStream(target));
@@ -592,23 +515,27 @@ public class EpgManager {
     }
 
     private RefreshResult ensureParsed() {
-        if (!epgFile.exists() || epgFile.length() == 0) {
-            return RefreshResult.error("没有 EPG 缓存文件");
-        }
+        if (!epgFile.exists() || epgFile.length() == 0) return RefreshResult.error("没有 EPG 缓存文件");
         return RefreshResult.ok();
     }
 
-    /**
-     * 增量解析指定 epgids 对应的 XMLTV 频道/节目，合并进现有缓存。
-     * 只有 refreshFromHash 中检测到 XML hash 变化时，才会整体清空。
-     */
+    // ==================================================================
+    // 核心：解析 XMLTV，把匹配到的 channel 归入对应的 epgid
+    //
+    // 匹配规则（全部为 trim 后精确匹配，不做任何字符处理）：
+    //   1) display-name 精确等于 requested epgid
+    //   2) display-name 是 epg_data.json 的某个变体名，且其 epgid 在 requested 里
+    //   3) display-name 是某个动态映射的键，且其值在 requested 里
+    // ==================================================================
     private boolean parseXmlForEpgIds(File file, Set<String> requestedEpgIds) {
         if (requestedEpgIds == null || requestedEpgIds.isEmpty()) return true;
+
         synchronized (parseLock) {
             try {
-                final Map<String, ChannelInfo> newByName = new HashMap<>();
-                final Map<String, ChannelInfo> newById = new HashMap<>();
+                // ===== 第一遍：解析 <channel>，确定每个 XMLTV channel 归属哪个 epgid =====
+                final Map<String, List<EpgProgram>> newPrograms = new HashMap<>();
                 final Map<String, List<String>> idsByEpgId = new HashMap<>();
+                final Map<String, String> iconUrlByEpgIdNew = new HashMap<>();
                 final Set<String> wantedXmlChannelIds = new HashSet<>();
 
                 XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
@@ -634,34 +561,17 @@ public class EpgManager {
                             }
                         } else if (event == XmlPullParser.END_TAG && "channel".equals(tag)) {
                             if (!TextUtils.isEmpty(channelId)) {
-                                String matchedEpgId = null;
-                                for (String displayName : displayNames) {
-                                    String mappedEpgId = getEpgIdByChannelName(displayName);
-                                    if (mappedEpgId != null && requestedEpgIds.contains(mappedEpgId)) {
-                                        matchedEpgId = mappedEpgId;
-                                        break;
-                                    }
-                                    if (requestedEpgIds.contains(displayName)) {
-                                        matchedEpgId = displayName;
-                                        break;
-                                    }
-                                }
+                                String matchedEpgId = matchChannelToEpgId(displayNames, requestedEpgIds);
                                 if (matchedEpgId != null) {
-                                    ChannelInfo info = new ChannelInfo(channelId, matchedEpgId, icon);
-                                    newById.put(channelId, info);
                                     List<String> ids = idsByEpgId.get(matchedEpgId);
-                                    if (ids == null) {
-                                        ids = new ArrayList<>();
-                                        idsByEpgId.put(matchedEpgId, ids);
-                                    }
+                                    if (ids == null) { ids = new ArrayList<>(); idsByEpgId.put(matchedEpgId, ids); }
                                     if (!ids.contains(channelId)) ids.add(channelId);
-                                    ChannelInfo representative = newByName.get(matchedEpgId);
-                                    if (representative == null || (TextUtils.isEmpty(representative.iconUrl) && !TextUtils.isEmpty(icon))) {
-                                        newByName.put(matchedEpgId, info);
-                                    }
                                     wantedXmlChannelIds.add(channelId);
-                                    FileLogger.write(TAG, "XMLTV 精确命中: epgid=[" + matchedEpgId
-                                            + "] displayName=[" + displayNames + "] -> channel id=[" + channelId + "] icon=[" + icon + "]");
+                                    if (!TextUtils.isEmpty(icon) && !iconUrlByEpgIdNew.containsKey(matchedEpgId)) {
+                                        iconUrlByEpgIdNew.put(matchedEpgId, icon);
+                                    }
+                                    FileLogger.write(TAG, "XMLTV 命中: epgid=[" + matchedEpgId
+                                            + "] displayName=" + displayNames + " channelId=[" + channelId + "]");
                                 }
                             }
                             channelId = null;
@@ -672,7 +582,7 @@ public class EpgManager {
                     }
                 }
 
-                final Map<String, List<EpgProgram>> newPrograms = new HashMap<>();
+                // ===== 第二遍：解析 <programme>，只保留想要的 channel =====
                 parser = factory.newPullParser();
                 try (InputStream input = new FileInputStream(file)) {
                     parser.setInput(input, null);
@@ -705,44 +615,30 @@ public class EpgManager {
                                 Date stopDate = parseXmltvTime(programStop);
                                 if (startDate != null && stopDate != null && stopDate.after(startDate)) {
                                     List<EpgProgram> list = newPrograms.get(programChannel);
-                                    if (list == null) {
-                                        list = new ArrayList<>();
-                                        newPrograms.put(programChannel, list);
-                                    }
+                                    if (list == null) { list = new ArrayList<>(); newPrograms.put(programChannel, list); }
                                     list.add(new EpgProgram(title, desc, startDate, stopDate));
                                 }
                             }
-                            programChannel = null;
-                            programStart = null;
-                            programStop = null;
-                            title = "";
-                            desc = "";
+                            programChannel = null; programStart = null; programStop = null;
+                            title = ""; desc = "";
                         }
                         event = parser.next();
                     }
                 }
 
-                // ===== 增量合并（不再 clear 已有缓存）=====
-                for (Map.Entry<String, ChannelInfo> e : newById.entrySet()) {
-                    channelsById.put(e.getKey(), e.getValue());
-                }
-                for (Map.Entry<String, ChannelInfo> e : newByName.entrySet()) {
-                    channelsByDisplayName.put(e.getKey(), e.getValue());
-                }
+                // ===== 增量合并 =====
                 for (Map.Entry<String, List<EpgProgram>> e : newPrograms.entrySet()) {
                     programsByChannelId.put(e.getKey(), e.getValue());
                 }
                 for (Map.Entry<String, List<String>> entry : idsByEpgId.entrySet()) {
                     String epgid = entry.getKey();
                     List<String> existing = xmlChannelIdsByEpgId.get(epgid);
-                    if (existing == null) {
-                        existing = new ArrayList<>();
-                        xmlChannelIdsByEpgId.put(epgid, existing);
-                    }
+                    if (existing == null) { existing = new ArrayList<>(); xmlChannelIdsByEpgId.put(epgid, existing); }
                     for (String id : entry.getValue()) {
                         if (!existing.contains(id)) existing.add(id);
                     }
                 }
+                // 重建合并后的 programmesByEpgId
                 for (Map.Entry<String, List<String>> entry : idsByEpgId.entrySet()) {
                     String epgid = entry.getKey();
                     List<String> allChannelIds = xmlChannelIdsByEpgId.get(epgid);
@@ -758,47 +654,73 @@ public class EpgManager {
                         return a.start.compareTo(b.start);
                     });
                     programsByEpgId.put(epgid, merged);
-                    FileLogger.write(TAG, "EPG完整汇总(增量): epgid=[" + epgid
+                    FileLogger.write(TAG, "EPG汇总(增量): epgid=[" + epgid
                             + "] channelIds=" + allChannelIds
                             + " programmes=" + merged.size()
                             + " dates=" + buildProgramDateKeys(merged));
                 }
-                for (Map.Entry<String, ChannelInfo> e : newByName.entrySet()) {
-                    String epgid = e.getKey();
-                    ChannelInfo info = e.getValue();
-                    if (info != null && !TextUtils.isEmpty(info.iconUrl)
-                            && !iconUrlByEpgId.containsKey(epgid)) {
-                        iconUrlByEpgId.put(epgid, info.iconUrl);
-                    }
+                // 台标 url（只补充不覆盖）
+                for (Map.Entry<String, String> e : iconUrlByEpgIdNew.entrySet()) {
+                    if (!iconUrlByEpgId.containsKey(e.getKey())) iconUrlByEpgId.put(e.getKey(), e.getValue());
                 }
                 loadedEpgIds.addAll(requestedEpgIds);
-                parsed = !channelsById.isEmpty();
+                parsed = !programsByEpgId.isEmpty() || !xmlChannelIdsByEpgId.isEmpty();
 
-                FileLogger.write(TAG, "按频道组增量解析完成: 本次请求=" + requestedEpgIds.size()
-                        + ", 本次命中=" + newByName.size()
-                        + ", 累计已加载=" + loadedEpgIds.size()
-                        + ", 累计通道数=" + channelsById.size()
-                        + ", 累计epgid数=" + programsByEpgId.size());
+                FileLogger.write(TAG, "按需增量解析完成: 请求=" + requestedEpgIds.size()
+                        + "，本次命中=" + idsByEpgId.size()
+                        + "，累计epgid=" + loadedEpgIds.size()
+                        + "，累计节目=" + programsByEpgId.size());
                 return true;
             } catch (Exception e) {
-                FileLogger.write(TAG, "按频道组解析失败", e);
+                FileLogger.write(TAG, "按需解析失败", e);
                 return false;
             }
         }
     }
 
-    // ======================== 分组 EPG 预热入口 ========================
+    /**
+     * 对单个 XMLTV channel 的所有 display-name，尝试匹配到 requestedEpgIds 里的某个 epgid。
+     * 全部为 trim 后精确匹配，不做任何字符处理。
+     */
+    private String matchChannelToEpgId(List<String> displayNames, Set<String> requestedEpgIds) {
+        if (displayNames == null || displayNames.isEmpty()) return null;
 
+        // 规则 1：display-name 精确等于某个 requested epgid
+        for (String dn : displayNames) {
+            String dnTrim = dn.trim();
+            if (requestedEpgIds.contains(dnTrim)) return dnTrim;
+        }
+
+        // 规则 2：display-name 精确等于 epg_data.json 的变体名，且其 epgid 在 requested 里
+        for (String dn : displayNames) {
+            String dnTrim = dn.trim();
+            String epgid = nameToEpgId.get(dnTrim);
+            if (epgid != null && requestedEpgIds.contains(epgid)) return epgid;
+        }
+
+        // 规则 3：display-name 精确等于动态映射的键，且其值在 requested 里
+        for (String dn : displayNames) {
+            String dnTrim = dn.trim();
+            synchronized (dynamicEpgIds) {
+                String epgid = dynamicEpgIds.get(dnTrim);
+                if (epgid != null && requestedEpgIds.contains(epgid)) return epgid;
+            }
+        }
+
+        return null;
+    }
+
+    // ==================================================================
+    // 分组 EPG 预热
+    // ==================================================================
     private final Runnable epgWarmupTask = new Runnable() {
-        @Override
-        public void run() {
+        @Override public void run() {
             List<String> names;
             synchronized (pendingEpgWarmup) {
                 if (pendingEpgWarmup.isEmpty()) return;
                 names = new ArrayList<>(pendingEpgWarmup);
                 pendingEpgWarmup.clear();
             }
-            FileLogger.write(TAG, "EPG自动预热触发: 频道数=" + names.size());
             loadChannelGroup(names, null);
         }
     };
@@ -818,35 +740,27 @@ public class EpgManager {
         mainHandler.postDelayed(epgWarmupTask, EPG_WARMUP_DELAY_MS);
     }
 
-    /**
-     * 分批下载台标，避免一次性塞满 iconExecutor 造成的网络/CPU 峰值。
-     * 每 250ms 只启动 2 个下载任务；切换分组时旧任务自动作废。
-     */
+    /** 分批下载台标 */
     private void scheduleIconWarmup(List<String> channelNames) {
         final int gen = ++iconWarmupGeneration;
         final List<String> list = new ArrayList<>();
-        for (String name : channelNames) {
-            if (!TextUtils.isEmpty(name)) list.add(name);
-        }
+        for (String name : channelNames) if (!TextUtils.isEmpty(name)) list.add(name);
         if (list.isEmpty()) return;
         mainHandler.post(new Runnable() {
             int index = 0;
             @Override public void run() {
-                if (gen != iconWarmupGeneration) return;      // 已被新分组取代
+                if (gen != iconWarmupGeneration) return;
                 int end = Math.min(index + 2, list.size());
-                for (int i = index; i < end; i++) {
-                    doLoadProcessedChannelIcon(list.get(i), null);
-                }
+                for (int i = index; i < end; i++) doLoadProcessedChannelIcon(list.get(i), null);
                 index = end;
-                if (index < list.size()) {
-                    mainHandler.postDelayed(this, 250L);
-                }
+                if (index < list.size()) mainHandler.postDelayed(this, 250L);
             }
         });
     }
 
     /**
-     * 主动调用：解析整个频道分组的 EPG。
+     * 加载指定频道列表的 EPG。
+     * 直接用原始名去 nameToEpgId 查 epgid；查不到就用原始名当 epgid。
      */
     public void loadChannelGroup(final List<String> channelNames, final Runnable onComplete) {
         if (channelNames == null || channelNames.isEmpty()) {
@@ -854,78 +768,30 @@ public class EpgManager {
             return;
         }
 
-        final Set<String> requested = new HashSet<>();
-        final Map<String, Set<String>> derivedToOriginal = new HashMap<>();
-
+        final Set<String> requestedEpgIds = new HashSet<>();
         for (String name : channelNames) {
             if (TextUtils.isEmpty(name)) continue;
             String epgid = getEpgIdByChannelName(name);
-            if (!TextUtils.isEmpty(epgid)) {
-                requested.add(epgid);
-                continue;
-            }
-            List<String> candidates = deriveEpgIdCandidates(name);
-            if (!candidates.isEmpty()) {
-                for (String cand : candidates) {
-                    requested.add(cand);
-                    Set<String> originals = derivedToOriginal.get(cand);
-                    if (originals == null) {
-                        originals = new HashSet<>();
-                        derivedToOriginal.put(cand, originals);
-                    }
-                    originals.add(name);
-                }
-                FileLogger.write(TAG, "EPG候选推导: name=[" + name + "] 候选=" + candidates);
-            }
+            if (TextUtils.isEmpty(epgid)) epgid = name;   // 直接用原始名当 epgid
+            requestedEpgIds.add(epgid);
         }
 
-        if (requested.isEmpty() || !epgFile.exists() || epgFile.length() == 0) {
+        if (requestedEpgIds.isEmpty() || !epgFile.exists() || epgFile.length() == 0) {
             if (onComplete != null) mainHandler.post(onComplete);
             return;
         }
 
         epgExecutor.execute(() -> {
-            final List<String[]> backfill = new ArrayList<>();
             try {
                 synchronized (parseLock) {
-                    // containsAll：requested 已是 loadedEpgIds 的子集才跳过
-                    if (!(parsed && loadedEpgIds.containsAll(requested))) {
-                        parseXmlForEpgIds(epgFile, requested);
+                    if (!(parsed && loadedEpgIds.containsAll(requestedEpgIds))) {
+                        parseXmlForEpgIds(epgFile, requestedEpgIds);
                     }
-
-                    for (Map.Entry<String, Set<String>> e : derivedToOriginal.entrySet()) {
-                        String candidate = e.getKey();
-                        if (xmlChannelIdsByEpgId.containsKey(candidate)) {
-                            for (String originalName : e.getValue()) {
-                                backfill.add(new String[]{originalName, candidate});
-                            }
-                        }
-                    }
-                }
-
-                if (!backfill.isEmpty()) {
-                    boolean changed = false;
-                    synchronized (dynamicEpgIds) {
-                        for (String[] pair : backfill) {
-                            String originalName = pair[0];
-                            String candidate = pair[1];
-                            if (originalName == null || candidate == null) continue;
-                            String existing = dynamicEpgIds.get(originalName);
-                            if (candidate.equals(existing)) continue;
-                            dynamicEpgIds.put(originalName, candidate);
-                            changed = true;
-                            FileLogger.write(TAG, "EPG映射回填: name=[" + originalName + "] -> epgid=[" + candidate + "]");
-                        }
-                    }
-                    if (changed) saveDynamicEpgIds();
-                } else if (!derivedToOriginal.isEmpty()) {
-                    FileLogger.write(TAG, "EPG候选未命中XMLTV，不做处理: 候选=" + derivedToOriginal.keySet());
                 }
             } catch (Exception e) {
                 FileLogger.write(TAG, "当前频道组 EPG 懒加载失败", e);
             } finally {
                 if (onComplete != null) mainHandler.post(onComplete);
-                // 分批预热台标，避免瞬时网络/CPU 峰值拖卡直播
                 scheduleIconWarmup(channelNames);
             }
         });
@@ -935,32 +801,26 @@ public class EpgManager {
         loadChannelGroup(channelNames, onComplete);
     }
 
+    // ==================================================================
+    // 查询接口
+    // ==================================================================
     public List<EpgProgram> getProgramsForChannel(String channelName) {
         List<EpgProgram> result = new ArrayList<>();
-        if (TextUtils.isEmpty(channelName)) return result;
-        if (!parsed) return result;
+        if (TextUtils.isEmpty(channelName) || !parsed) return result;
         String epgid = getEpgIdByChannelName(channelName);
-        if (TextUtils.isEmpty(epgid)) {
-            FileLogger.write(TAG, "EPG严格映射失败① 原始频道名未命中 epg_data.json/dynamic_epg_ids.json: name=[" + channelName + "]");
-            return result;
-        }
+        if (TextUtils.isEmpty(epgid)) epgid = channelName;  // 用原始名当 epgid
         synchronized (parseLock) {
             List<String> ids = xmlChannelIdsByEpgId.get(epgid);
-            if (ids == null || ids.isEmpty()) {
-                FileLogger.write(TAG, "EPG映射失败② epgid 未精确命中 XMLTV display-name: name=[" + channelName + "] epgid=[" + epgid + "]");
-                return result;
-            }
+            if (ids == null || ids.isEmpty()) return result;
             List<EpgProgram> all = programsByEpgId.get(epgid);
             if (all != null) result.addAll(all);
-            FileLogger.write(TAG, "EPG严格映射完成: name=[" + channelName + "] -> epgid=[" + epgid
-                    + "] -> channel ids=" + ids
-                    + " -> 全部programme=" + result.size() + " -> 日期=" + buildProgramDateKeys(result));
         }
         return result;
     }
 
     public String getEpgIdByChannelNameForLogo(String channelName) {
-        return getEpgIdByChannelName(channelName);
+        String epgid = getEpgIdByChannelName(channelName);
+        return TextUtils.isEmpty(epgid) ? channelName : epgid;
     }
 
     public String getChannelIconUrlForLogo(String channelName) {
@@ -970,7 +830,7 @@ public class EpgManager {
     public String getChannelIconUrl(String channelName) {
         if (!parsed || TextUtils.isEmpty(channelName)) return "";
         String epgid = getEpgIdByChannelName(channelName);
-        if (TextUtils.isEmpty(epgid)) return "";
+        if (TextUtils.isEmpty(epgid)) epgid = channelName;
         synchronized (parseLock) {
             String icon = iconUrlByEpgId.get(epgid);
             return TextUtils.isEmpty(icon) ? "" : icon;
@@ -981,7 +841,9 @@ public class EpgManager {
         return null;
     }
 
-    // ======================== 台标：本地 → EPG → GitHub ========================
+    // ==================================================================
+    // 台标：本地 → EPG → GitHub
+    // ==================================================================
     public void loadProcessedChannelIcon(final String channelName, final IconCallback callback) {
         requestEpgWarmUp(channelName);
         doLoadProcessedChannelIcon(channelName, callback);
@@ -992,30 +854,23 @@ public class EpgManager {
             if (callback != null) mainHandler.post(() -> callback.onIcon(null));
             return;
         }
-        final String epgid = getEpgIdByChannelName(channelName);
-        if (TextUtils.isEmpty(epgid)) {
-            FileLogger.write(TAG, "台标加载失败：频道未在 epg_data.json/dynamic_epg_ids.json 命中: name=[" + channelName + "]");
-            if (callback != null) mainHandler.post(() -> callback.onIcon(null));
-            return;
-        }
+        // epgid 直接用原始名或映射到的值
+        String mapped = getEpgIdByChannelName(channelName);
+        final String epgid = TextUtils.isEmpty(mapped) ? channelName : mapped;
+
         final File target = new File(logoDir, epgid + ".png");
 
         if (target.exists() && target.length() > 0) {
             if (callback != null) mainHandler.post(() -> callback.onIcon(target));
             return;
         }
-
         if (!iconInFlight.add(epgid)) {
             if (callback != null) {
                 final Runnable[] checker = new Runnable[1];
                 checker[0] = () -> {
-                    if (target.exists() && target.length() > 0) {
-                        callback.onIcon(target);
-                    } else if (iconInFlight.contains(epgid)) {
-                        mainHandler.postDelayed(checker[0], 120);
-                    } else {
-                        callback.onIcon(null);
-                    }
+                    if (target.exists() && target.length() > 0) callback.onIcon(target);
+                    else if (iconInFlight.contains(epgid)) mainHandler.postDelayed(checker[0], 120);
+                    else callback.onIcon(null);
                 };
                 mainHandler.postDelayed(checker[0], 120);
             }
@@ -1026,41 +881,20 @@ public class EpgManager {
             File result = null;
             try {
                 String epgIconUrl;
-                synchronized (parseLock) {
-                    epgIconUrl = iconUrlByEpgId.get(epgid);
-                }
+                synchronized (parseLock) { epgIconUrl = iconUrlByEpgId.get(epgid); }
                 if (!TextUtils.isEmpty(epgIconUrl)) {
-                    FileLogger.write(TAG, "台标尝试来源=EPG: epgid=[" + epgid + "] url=[" + epgIconUrl + "]");
                     result = downloadEpgIconAndSave(epgid, epgIconUrl, target);
-                    if (result != null) {
-                        FileLogger.write(TAG, "台标来源命中=EPG: epgid=[" + epgid + "] -> " + target.getAbsolutePath());
-                    } else {
-                        FileLogger.write(TAG, "EPG 台标下载/处理失败，回退 GitHub: epgid=[" + epgid + "]");
-                    }
-                } else {
-                    FileLogger.write(TAG, "EPG 中无台标地址，直接尝试 GitHub: epgid=[" + epgid + "]");
                 }
-
                 if (result == null) {
                     String githubUrl = GITHUB_LOGO_BASE_URL + epgid + ".png";
-                    FileLogger.write(TAG, "台标尝试来源=GitHub: epgid=[" + epgid + "] url=[" + githubUrl + "]");
                     result = downloadGithubIconAndSave(epgid, githubUrl, target);
-                    if (result != null) {
-                        FileLogger.write(TAG, "台标来源命中=GitHub: epgid=[" + epgid + "] -> " + target.getAbsolutePath());
-                    }
-                }
-
-                if (result == null) {
-                    FileLogger.write(TAG, "台标最终未获取: epgid=[" + epgid + "] name=[" + channelName + "]");
                 }
             } catch (Exception e) {
                 FileLogger.write(TAG, "台标加载异常: epgid=[" + epgid + "]", e);
             } finally {
                 iconInFlight.remove(epgid);
                 final File finalResult = result;
-                if (callback != null) {
-                    mainHandler.post(() -> callback.onIcon(finalResult));
-                }
+                if (callback != null) mainHandler.post(() -> callback.onIcon(finalResult));
             }
         });
     }
@@ -1072,40 +906,23 @@ public class EpgManager {
         try {
             Request request = new Request.Builder().url(url).get().build();
             try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful() || response.body() == null) {
-                    FileLogger.write(TAG, "EPG 台标下载失败 HTTP " + response.code() + ": " + url);
-                    return null;
-                }
+                if (!response.isSuccessful() || response.body() == null) return null;
                 byte[] data = response.body().bytes();
                 bitmap = BitmapFactory.decodeByteArray(data, 0, data.length);
-                if (bitmap == null) {
-                    FileLogger.write(TAG, "EPG 台标解码失败: " + url);
-                    return null;
-                }
+                if (bitmap == null) return null;
                 transparent = makeTransparent(bitmap);
-                if (transparent == null) {
-                    FileLogger.write(TAG, "EPG 台标透明化失败: " + url);
-                    return null;
-                }
-
-                if (!logoDir.exists() && !logoDir.mkdirs() && !logoDir.isDirectory()) {
-                    FileLogger.write(TAG, "无法创建台标目录: " + logoDir.getAbsolutePath());
-                    return null;
-                }
+                if (transparent == null) return null;
+                if (!logoDir.exists() && !logoDir.mkdirs() && !logoDir.isDirectory()) return null;
                 tmp = File.createTempFile("logo_", ".png", logoDir);
                 try (FileOutputStream out = new FileOutputStream(tmp, false)) {
-                    if (!transparent.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                        throw new java.io.IOException("PNG 写入失败");
-                    }
+                    if (!transparent.compress(Bitmap.CompressFormat.PNG, 100, out)) throw new java.io.IOException("PNG 写入失败");
                     out.flush();
                     try { out.getFD().sync(); } catch (Exception ignored) { }
                 }
                 if (!tmp.exists() || tmp.length() <= 0) throw new java.io.IOException("临时 PNG 未生成");
-
                 return installTmpFile(tmp, target) ? target : null;
             }
         } catch (Exception e) {
-            FileLogger.write(TAG, "EPG 台标下载/处理异常: epgid=[" + epgid + "] url=[" + url + "]", e);
             if (tmp != null && tmp.exists()) tmp.delete();
             return null;
         } finally {
@@ -1119,40 +936,22 @@ public class EpgManager {
         try {
             Request request = new Request.Builder().url(url).get().build();
             try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful() || response.body() == null) {
-                    FileLogger.write(TAG, "GitHub 台标下载失败 HTTP " + response.code() + ": " + url);
-                    return null;
-                }
+                if (!response.isSuccessful() || response.body() == null) return null;
                 byte[] data = response.body().bytes();
-                if (data == null || data.length == 0) {
-                    FileLogger.write(TAG, "GitHub 台标数据为空: " + url);
-                    return null;
-                }
-
+                if (data == null || data.length == 0) return null;
                 Bitmap probe = BitmapFactory.decodeByteArray(data, 0, data.length);
-                if (probe == null) {
-                    FileLogger.write(TAG, "GitHub 台标解码校验失败（可能不是图片）: " + url);
-                    return null;
-                }
+                if (probe == null) return null;
                 probe.recycle();
-
-                if (!logoDir.exists() && !logoDir.mkdirs() && !logoDir.isDirectory()) {
-                    FileLogger.write(TAG, "无法创建台标目录: " + logoDir.getAbsolutePath());
-                    return null;
-                }
+                if (!logoDir.exists() && !logoDir.mkdirs() && !logoDir.isDirectory()) return null;
                 tmp = File.createTempFile("logo_gh_", ".png", logoDir);
                 try (FileOutputStream out = new FileOutputStream(tmp, false)) {
-                    out.write(data);
-                    out.flush();
+                    out.write(data); out.flush();
                     try { out.getFD().sync(); } catch (Exception ignored) { }
                 }
                 if (!tmp.exists() || tmp.length() <= 0) throw new java.io.IOException("临时 PNG 未生成");
-
-                FileLogger.write(TAG, "GitHub 台标已下载（跳过透明化）: epgid=[" + epgid + "] size=" + data.length);
                 return installTmpFile(tmp, target) ? target : null;
             }
         } catch (Exception e) {
-            FileLogger.write(TAG, "GitHub 台标下载异常: epgid=[" + epgid + "] url=[" + url + "]", e);
             if (tmp != null && tmp.exists()) tmp.delete();
             return null;
         }
@@ -1164,80 +963,50 @@ public class EpgManager {
             if (backup.exists()) backup.delete();
             boolean movedOld = target.exists() && target.renameTo(backup);
             boolean installed = tmp.renameTo(target);
-            if (!installed) {
-                copyFile(tmp, target);
-                installed = target.exists() && target.length() > 0;
-            }
-            if (!installed) {
-                if (movedOld && !target.exists()) backup.renameTo(target);
-                FileLogger.write(TAG, "台标安装失败: " + target.getAbsolutePath());
-                return false;
-            }
+            if (!installed) { copyFile(tmp, target); installed = target.exists() && target.length() > 0; }
+            if (!installed) { if (movedOld && !target.exists()) backup.renameTo(target); return false; }
             if (backup.exists()) backup.delete();
             if (tmp.exists()) tmp.delete();
             return true;
         } catch (Exception e) {
-            FileLogger.write(TAG, "台标安装异常: " + target.getAbsolutePath(), e);
             if (tmp != null && tmp.exists()) tmp.delete();
             return false;
         }
     }
 
-    public interface IconCallback {
-        void onIcon(File file);
-    }
+    public interface IconCallback { void onIcon(File file); }
 
     public void clearLogoSourceCache() {
         if (!logoDir.exists()) return;
         File[] files = logoDir.listFiles();
         if (files == null) return;
-        for (File f : files) {
-            if (f == null) continue;
-            try { f.delete(); } catch (Exception ignored) { }
-        }
-        FileLogger.write(TAG, "台标缓存已清空: " + logoDir.getAbsolutePath());
+        for (File f : files) { if (f == null) continue; try { f.delete(); } catch (Exception ignored) { } }
     }
 
-    // ======================== EPG 日期/节目查询 ========================
-
+    // ==================================================================
+    // 日期/节目查询
+    // ==================================================================
     public List<Date> getAvailableDatesForChannel(String channelName) {
         List<Date> result = new ArrayList<>();
-        List<EpgProgram> programs = getProgramsForChannel(channelName);
         TimeZone tz = TimeZone.getTimeZone("GMT+8:00");
-        for (EpgProgram p : programs) {
+        for (EpgProgram p : getProgramsForChannel(channelName)) {
             if (p == null || p.start == null || p.stop == null) continue;
             addAllProgramDates(result, p.start, p.stop, tz);
         }
         Collections.sort(result);
-        if (!result.isEmpty()) {
-            SimpleDateFormat day = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
-            day.setTimeZone(tz);
-            StringBuilder dates = new StringBuilder();
-            for (Date d : result) { if (dates.length() > 0) dates.append(','); dates.append(day.format(d)); }
-            FileLogger.write(TAG, "频道全部EPG日期: name=[" + channelName + "] programmes=" + programs.size() + " dates=" + dates);
-        } else {
-            FileLogger.write(TAG, "频道无EPG日期: name=[" + channelName + "] programmes=" + programs.size());
-        }
         return result;
     }
 
     private void addAllProgramDates(List<Date> dates, Date start, Date stop, TimeZone tz) {
         Calendar cal = Calendar.getInstance(tz);
         cal.setTime(start);
-        cal.set(Calendar.HOUR_OF_DAY, 0);
-        cal.set(Calendar.MINUTE, 0);
-        cal.set(Calendar.SECOND, 0);
-        cal.set(Calendar.MILLISECOND, 0);
+        cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0);
+        cal.set(Calendar.SECOND, 0); cal.set(Calendar.MILLISECOND, 0);
         Calendar end = Calendar.getInstance(tz);
         end.setTime(new Date(Math.max(start.getTime(), stop.getTime() - 1L)));
-        end.set(Calendar.HOUR_OF_DAY, 0);
-        end.set(Calendar.MINUTE, 0);
-        end.set(Calendar.SECOND, 0);
-        end.set(Calendar.MILLISECOND, 0);
-        while (!cal.after(end)) {
-            addDate(dates, cal.getTime());
-            cal.add(Calendar.DAY_OF_MONTH, 1);
-        }
+        end.set(Calendar.HOUR_OF_DAY, 0); end.set(Calendar.MINUTE, 0);
+        end.set(Calendar.SECOND, 0); end.set(Calendar.MILLISECOND, 0);
+        while (!cal.after(end)) { addDate(dates, cal.getTime()); cal.add(Calendar.DAY_OF_MONTH, 1); }
     }
 
     private void addDate(List<Date> dates, Date value) {
@@ -1246,10 +1015,7 @@ public class EpgManager {
         day.setTimeZone(TimeZone.getTimeZone("GMT+8:00"));
         String key = day.format(value);
         for (Date d : dates) if (key.equals(day.format(d))) return;
-        try {
-            Date parsedDay = day.parse(key);
-            if (parsedDay != null) dates.add(parsedDay);
-        } catch (Exception ignored) { }
+        try { Date parsedDay = day.parse(key); if (parsedDay != null) dates.add(parsedDay); } catch (Exception ignored) { }
     }
 
     public List<EpgProgram> getAllProgramsForChannel(String channelName) {
@@ -1259,31 +1025,22 @@ public class EpgManager {
     public List<EpgProgram> getProgramsForChannelOnDate(String channelName, Date date) {
         List<EpgProgram> result = new ArrayList<>();
         if (date == null) return result;
-
         TimeZone tz = TimeZone.getTimeZone("GMT+8:00");
         Calendar startCal = Calendar.getInstance(tz);
         startCal.setTime(date);
-        startCal.set(Calendar.HOUR_OF_DAY, 0);
-        startCal.set(Calendar.MINUTE, 0);
-        startCal.set(Calendar.SECOND, 0);
-        startCal.set(Calendar.MILLISECOND, 0);
+        startCal.set(Calendar.HOUR_OF_DAY, 0); startCal.set(Calendar.MINUTE, 0);
+        startCal.set(Calendar.SECOND, 0); startCal.set(Calendar.MILLISECOND, 0);
         long dayStart = startCal.getTimeInMillis();
         long dayEnd = dayStart + TimeUnit.DAYS.toMillis(1);
-
         for (EpgProgram p : getProgramsForChannel(channelName)) {
             if (p == null || p.start == null || p.stop == null) continue;
             if (p.start.getTime() < dayEnd && p.stop.getTime() > dayStart) result.add(p);
         }
         Collections.sort(result, (a, b) -> a.start.compareTo(b.start));
-        SimpleDateFormat dayLog = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
-        dayLog.setTimeZone(tz);
-        FileLogger.write(TAG, "按日期读取EPG: name=[" + channelName + "] date=[" + dayLog.format(date) + "] programmes=" + result.size());
         return result;
     }
 
-    public boolean isEpgParsed() {
-        return parsed && !channelsById.isEmpty();
-    }
+    public boolean isEpgParsed() { return parsed && !programsByEpgId.isEmpty(); }
 
     public List<Date> getAllAvailableDates() {
         List<Date> result = new ArrayList<>();
@@ -1317,54 +1074,39 @@ public class EpgManager {
         return null;
     }
 
-    // ======================== 台标透明化 ========================
-
+    // ==================================================================
+    // 台标透明化
+    // ==================================================================
     private Bitmap makeTransparent(Bitmap src) {
         if (src == null) return null;
         final int width = src.getWidth(), height = src.getHeight();
         Bitmap result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         result.setHasAlpha(true);
-
         int[] pixels = new int[width * height];
         src.getPixels(pixels, 0, width, 0, 0, width, height);
-
-        int transparent = 0;
         for (int i = 0; i < pixels.length; i++) {
             int c = pixels[i];
             int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
             int max = Math.max(r, Math.max(g, b));
             int min = Math.min(r, Math.min(g, b));
             int spread = max - min;
-
-            if (max >= 235 && spread <= 20) {
-                pixels[i] = Color.argb(0, r, g, b); transparent++; continue;
-            }
-            if (max >= 215 && spread <= 35) {
-                pixels[i] = Color.argb(0, r, g, b); transparent++; continue;
-            }
-            if (max >= 195 && spread <= 50) {
-                pixels[i] = Color.argb(0, r, g, b); transparent++; continue;
-            }
+            if (max >= 235 && spread <= 20) { pixels[i] = Color.argb(0, r, g, b); continue; }
+            if (max >= 215 && spread <= 35) { pixels[i] = Color.argb(0, r, g, b); continue; }
+            if (max >= 195 && spread <= 50) { pixels[i] = Color.argb(0, r, g, b); continue; }
             if (max >= 175 && spread <= 60) {
                 int alpha = (int) (100 + (max - 175) * 120 / 20.0);
                 alpha = Math.max(60, Math.min(230, alpha));
-                pixels[i] = Color.argb(alpha, r, g, b); transparent++; continue;
+                pixels[i] = Color.argb(alpha, r, g, b); continue;
             }
         }
-
         result.setPixels(pixels, 0, width, 0, 0, width, height);
         result.setHasAlpha(true);
-
-        int tl = Color.alpha(pixels[0]);
-        int tr = Color.alpha(pixels[width - 1]);
-        int bl = Color.alpha(pixels[(height - 1) * width]);
-        int br = Color.alpha(pixels[height * width - 1]);
-        FileLogger.write(TAG, "台标透明化完成V7: " + width + "x" + height
-                + " transparent=" + transparent + " 四角alpha=[" + tl + "," + tr + "," + bl + "," + br + "]");
         return result;
     }
 
-    // ======================== 工具 ========================
+    // ==================================================================
+    // 工具
+    // ==================================================================
     private String buildProgramDateKeys(List<EpgProgram> programs) {
         LinkedHashSet<String> keys = new LinkedHashSet<>();
         if (programs == null) return "[]";
@@ -1376,11 +1118,7 @@ public class EpgManager {
             c.setTime(p.start);
             Calendar end = Calendar.getInstance(TimeZone.getTimeZone("GMT+8:00"));
             end.setTime(p.stop);
-            while (!c.after(end)) {
-                keys.add(day.format(c.getTime()));
-                c.add(Calendar.DAY_OF_MONTH, 1);
-                if (keys.size() > 31) break;
-            }
+            while (!c.after(end)) { keys.add(day.format(c.getTime())); c.add(Calendar.DAY_OF_MONTH, 1); if (keys.size() > 31) break; }
         }
         return keys.toString();
     }
@@ -1415,10 +1153,7 @@ public class EpgManager {
                 SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmmss", Locale.US);
                 sdf.setTimeZone(TimeZone.getTimeZone("GMT+8:00"));
                 return sdf.parse(value.substring(0, 14));
-            } catch (Exception second) {
-                FileLogger.write(TAG, "时间解析失败: " + value);
-                return null;
-            }
+            } catch (Exception second) { return null; }
         }
     }
 
@@ -1429,16 +1164,12 @@ public class EpgManager {
             int n;
             while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
             return out.toString("UTF-8").trim();
-        } catch (Exception e) {
-            return "";
-        }
+        } catch (Exception e) { return ""; }
     }
 
     private static void writeTextAtomically(File target, String text) throws Exception {
         File tmp = new File(target.getParentFile(), target.getName() + ".tmp");
-        try (FileOutputStream out = new FileOutputStream(tmp)) {
-            out.write(text.getBytes(StandardCharsets.UTF_8));
-        }
+        try (FileOutputStream out = new FileOutputStream(tmp)) { out.write(text.getBytes(StandardCharsets.UTF_8)); }
         if (target.exists()) target.delete();
         if (!tmp.renameTo(target)) copyFile(tmp, target);
         if (tmp.exists()) tmp.delete();
@@ -1449,17 +1180,6 @@ public class EpgManager {
             byte[] buffer = new byte[32 * 1024];
             int n;
             while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
-        }
-    }
-
-    private static class ChannelInfo {
-        final String channelId;
-        final String displayName;
-        final String iconUrl;
-        ChannelInfo(String channelId, String displayName, String iconUrl) {
-            this.channelId = channelId;
-            this.displayName = displayName;
-            this.iconUrl = iconUrl;
         }
     }
 
